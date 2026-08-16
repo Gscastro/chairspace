@@ -3,9 +3,38 @@
 A working prototype of a two-sided marketplace: salon/shop owners list open chairs, booths,
 or suites for rent, and barbers search, request, and message them about renting a spot.
 
-This is a **functional demo running on sample data** — not connected to real payments and not
-deployed to a public URL. It's meant to be clicked through, tested, and used as the starting
-point for a real build.
+This is a **functional demo running on sample data** — not connected to real payments. It's
+meant to be clicked through, tested, and used as the starting point for a real build.
+
+## Deploying this to a live URL (Render)
+
+This repo is ready to deploy on [Render](https://render.com) as a Node web service — it
+includes a `render.yaml` blueprint and a `.node-version` file so Render picks Node 22+
+(required for the built-in SQLite support).
+
+**1. Push this code to a new GitHub repository** (from a terminal, in this folder):
+
+```bash
+# Create a new empty repository at github.com/new first, then:
+git remote add origin https://github.com/YOUR_USERNAME/chairspace.git
+git branch -M main
+git push -u origin main
+```
+
+(This folder is already a git repo with one commit, so you just need to add the remote and push.)
+
+**2. Connect Render:** go to [dashboard.render.com](https://dashboard.render.com), sign in
+(or sign up — the free tier is fine to start), and connect your GitHub account when prompted.
+
+**3. Create the web service:** click **New > Web Service**, pick the `chairspace` repo you
+just pushed. Render should auto-detect the `render.yaml` blueprint (Node, no build step,
+start command `node server.js`). Otherwise set those manually. Deploy.
+
+**Important caveat:** Render's free tier doesn't support a persistent disk, so the SQLite
+database resets on every redeploy (fine for a demo people are trying out, not fine for
+real user data). `render.yaml` has commented-out instructions for adding a persistent disk
+once you're ready to upgrade to a paid instance — or plan to migrate to a hosted Postgres
+database for a real launch.
 
 ## What's included
 
