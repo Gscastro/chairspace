@@ -1,0 +1,13 @@
+{
+  "name": "chairspace",
+  "version": "1.0.0",
+  "description": "Marketplace for barbers to find and rent open chairs/booths at salons and shops",
+  "main": "server.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {}
+}

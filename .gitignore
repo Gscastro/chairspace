@@ -1,0 +1,5 @@
+chairspace.db
+chairspace.db-shm
+chairspace.db-wal
+node_modules
+server.log
