@@ -244,6 +244,69 @@ const App = (() => {
   }
 
   // ---------- listing detail ----------
+  let heroState = { photos: [], index: 0 };
+
+  function heroSectionHtml(l) {
+    const photos = l.photos || [];
+    const avail = availabilityLabel(l.available_from);
+    const badges = `
+      <div class="card-tags">
+        <span class="badge">${escapeHtml(l.chair_type)}</span>
+        ${!l.active ? '<span class="badge status-declined">Inactive</span>' : ''}
+        <span class="avail-tag ${avail === 'Available now' ? 'now' : ''}">${escapeHtml(avail)}</span>
+      </div>
+    `;
+    const overlay = `
+      <div class="hero-overlay">
+        ${badges}
+        <h1>${escapeHtml(l.title)}</h1>
+        <div class="hero-meta">${escapeHtml(l.city)}, ${escapeHtml(l.state)}</div>
+      </div>
+    `;
+    let mediaHtml;
+    if (photos.length > 1) {
+      mediaHtml = `
+        <img id="hero-slide-img" class="hero-img" src="${photos[0]}" alt="${escapeHtml(l.title)}" />
+        <button type="button" class="hero-arrow left" onclick="App.heroPrev()" aria-label="Previous photo">&#8249;</button>
+        <button type="button" class="hero-arrow right" onclick="App.heroNext()" aria-label="Next photo">&#8250;</button>
+        <div class="hero-dots">${photos.map((_, i) => `<span class="hero-dot${i === 0 ? ' active' : ''}" onclick="App.heroGoTo(${i})"></span>`).join('')}</div>
+      `;
+    } else if (photos.length === 1) {
+      mediaHtml = `<img class="hero-img" src="${photos[0]}" alt="${escapeHtml(l.title)}" />`;
+    } else {
+      mediaHtml = `
+        <div class="hero-placeholder">
+          <span>💈</span>
+          <img src="${photoUrl(l.photo_seed, 900, 500)}" alt="${escapeHtml(l.title)}" loading="lazy" onerror="this.remove()" />
+        </div>
+      `;
+    }
+    return `<div class="hero-wrap">${mediaHtml}${overlay}</div>`;
+  }
+
+  function updateHeroSlide() {
+    const img = document.getElementById('hero-slide-img');
+    if (img && heroState.photos.length) img.src = heroState.photos[heroState.index];
+    document.querySelectorAll('.hero-dot').forEach((d, i) => d.classList.toggle('active', i === heroState.index));
+  }
+
+  function heroNext() {
+    if (!heroState.photos.length) return;
+    heroState.index = (heroState.index + 1) % heroState.photos.length;
+    updateHeroSlide();
+  }
+
+  function heroPrev() {
+    if (!heroState.photos.length) return;
+    heroState.index = (heroState.index - 1 + heroState.photos.length) % heroState.photos.length;
+    updateHeroSlide();
+  }
+
+  function heroGoTo(i) {
+    heroState.index = i;
+    updateHeroSlide();
+  }
+
   async function renderListingDetail(id) {
     $app().innerHTML = `<p class="spinner-note">Loading listing...</p>`;
     let data;
@@ -256,23 +319,13 @@ const App = (() => {
     const l = data.listing;
     const isOwnerOfThis = state.user && state.user.role === 'owner' && state.user.id === l.owner_id;
     const canRequest = state.user && state.user.role === 'barber';
+    heroState = { photos: (l.photos && l.photos.length > 1) ? l.photos : [], index: 0 };
 
     $app().innerHTML = `
       <div class="detail-grid">
         <div>
-          <div class="detail-photo">${photoBlock(l, { w: 900, h: 500, tall: true, alt: l.title })}</div>
-          ${l.photos && l.photos.length > 1 ? `
-            <div class="photo-thumb-row">
-              ${l.photos.map(p => `<div class="photo-thumb"><img src="${p}" alt="${escapeHtml(l.title)}" /></div>`).join('')}
-            </div>
-          ` : ''}
-          <div class="card-tags">
-            <span class="badge">${escapeHtml(l.chair_type)}</span>
-            ${!l.active ? '<span class="badge status-declined">Inactive</span>' : ''}
-            <span class="avail-tag ${availabilityLabel(l.available_from) === 'Available now' ? 'now' : ''}">${escapeHtml(availabilityLabel(l.available_from))}</span>
-          </div>
-          <h1 style="margin:8px 0 2px;">${escapeHtml(l.title)}</h1>
-          <div class="card-meta">${escapeHtml(l.address ? l.address + ', ' : '')}${escapeHtml(l.city)}, ${escapeHtml(l.state)} ${escapeHtml(l.zip || '')}${l.total_chairs ? ' &middot; ' + l.total_chairs + '-chair shop' : ''}</div>
+          ${heroSectionHtml(l)}
+          <div class="card-meta" style="margin-top:14px;">${escapeHtml(l.address ? l.address + ', ' : '')}${escapeHtml(l.city)}, ${escapeHtml(l.state)} ${escapeHtml(l.zip || '')}${l.total_chairs ? ' &middot; ' + l.total_chairs + '-chair shop' : ''}</div>
           <p>${escapeHtml(l.description || 'No description provided.')}</p>
           <h3>Hosted by</h3>
           <p class="card-meta">${escapeHtml(l.owner.name)}${l.owner.bio ? ' — ' + escapeHtml(l.owner.bio) : ''}</p>
@@ -280,6 +333,7 @@ const App = (() => {
         <div>
           <div class="side-card">
             <div class="price-tag">${money(l.price)}${unitLabel(l.price_unit)}</div>
+            ${!isOwnerOfThis ? `<button class="pill-btn contact-owner-btn" type="button" onclick="App.openContactModal(${l.id})">Contact Owner</button>` : ''}
             <div id="request-area" style="margin-top:14px;"></div>
           </div>
         </div>
@@ -343,6 +397,66 @@ const App = (() => {
       evt.target.reset();
     } catch (e) {
       msgEl.innerHTML = `<p class="msg">${escapeHtml(e.message)}</p>`;
+    }
+  }
+
+  // ---------- contact owner popup (no login required) ----------
+  function openContactModal(listingId) {
+    const root = document.getElementById('modal-root');
+    if (!root) return;
+    root.innerHTML = `
+      <div class="modal-backdrop" onclick="if (event.target === this) App.closeContactModal()">
+        <div class="modal-card">
+          <button type="button" class="modal-close" onclick="App.closeContactModal()" aria-label="Close">&times;</button>
+          <h2>Interested in this booth?</h2>
+          <p class="card-meta">Send your info straight to the shop owner — no account needed.</p>
+          <form class="stack" onsubmit="App.submitInquiry(event, ${listingId})">
+            <div class="field"><label>Name</label><input type="text" name="name" required /></div>
+            <div class="field"><label>Email</label><input type="email" name="email" required /></div>
+            <div class="field"><label>Phone number</label><input type="tel" name="phone" /></div>
+            <div class="field"><label>Social media (optional)</label><input type="text" name="social" placeholder="@yourhandle" /></div>
+            <div class="field"><label>Tell them a bit about you</label><textarea name="message" placeholder="How many years you've been cutting, what you specialize in, any awards or achievements..."></textarea></div>
+            <div class="modal-actions">
+              <button class="pill-btn" type="submit">Notify Shop Owner</button>
+              <button class="pill-btn ghost" type="button" onclick="App.closeContactModal()">No thanks</button>
+            </div>
+            <div id="inquiry-msg"></div>
+          </form>
+        </div>
+      </div>
+    `;
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeContactModal() {
+    const root = document.getElementById('modal-root');
+    if (root) root.innerHTML = '';
+    document.body.style.overflow = '';
+  }
+
+  async function submitInquiry(evt, listingId) {
+    evt.preventDefault();
+    const f = new FormData(evt.target);
+    const msgEl = document.getElementById('inquiry-msg');
+    try {
+      await api('/api/listings/' + listingId + '/inquiries', {
+        method: 'POST',
+        body: {
+          name: f.get('name'), email: f.get('email'), phone: f.get('phone'),
+          social: f.get('social'), message: f.get('message'),
+        },
+      });
+      const card = document.querySelector('.modal-card');
+      if (card) {
+        card.innerHTML = `
+          <button type="button" class="modal-close" onclick="App.closeContactModal()" aria-label="Close">&times;</button>
+          <h2>Thanks!</h2>
+          <p class="card-meta">Your info was sent to the shop owner — they'll reach out directly.</p>
+          <button class="pill-btn" type="button" onclick="App.closeContactModal()">Done</button>
+        `;
+      }
+    } catch (e) {
+      if (msgEl) msgEl.innerHTML = `<p class="msg">${escapeHtml(e.message)}</p>`;
     }
   }
 
@@ -701,6 +815,7 @@ const App = (() => {
       <div class="tabs">
         <button id="tab-listings" class="active" onclick="App.showOwnerTab('listings')">My Listings</button>
         <button id="tab-requests" onclick="App.showOwnerTab('requests')">Requests Received</button>
+        <button id="tab-inquiries" onclick="App.showOwnerTab('inquiries')">Inquiries</button>
       </div>
       <div id="tab-content"><p class="spinner-note">Loading...</p></div>
     `;
@@ -712,6 +827,7 @@ const App = (() => {
     lastOwnerTab = tab;
     document.getElementById('tab-listings').classList.toggle('active', tab === 'listings');
     document.getElementById('tab-requests').classList.toggle('active', tab === 'requests');
+    document.getElementById('tab-inquiries').classList.toggle('active', tab === 'inquiries');
     const content = document.getElementById('tab-content');
     content.innerHTML = `<p class="spinner-note">Loading...</p>`;
     try {
@@ -722,17 +838,42 @@ const App = (() => {
           return;
         }
         content.innerHTML = `<div class="grid">${listings.map(listingCard).join('')}</div>`;
-      } else {
+      } else if (tab === 'requests') {
         const { requests } = await api('/api/requests/received');
         if (requests.length === 0) {
           content.innerHTML = `<div class="empty-state">No rental requests yet.</div>`;
           return;
         }
         content.innerHTML = requests.map(requestRow('owner')).join('');
+      } else {
+        const { inquiries } = await api('/api/inquiries/received');
+        if (inquiries.length === 0) {
+          content.innerHTML = `<div class="empty-state">No inquiries yet. When someone taps "Contact Owner" on one of your listings, it'll show up here.</div>`;
+          return;
+        }
+        content.innerHTML = inquiries.map(inquiryRow).join('');
       }
     } catch (e) {
       content.innerHTML = `<p class="msg">${escapeHtml(e.message)}</p>`;
     }
+  }
+
+  function inquiryRow(i) {
+    const listingTitle = i.listing ? i.listing.title : '(listing removed)';
+    return `
+      <div class="request-row">
+        <div class="info">
+          <div>
+            <a onclick="App.nav('/listing/${i.listing ? i.listing.id : ''}')" style="font-weight:700; cursor:pointer;">${escapeHtml(listingTitle)}</a>
+          </div>
+          <div class="card-meta">
+            <b>${escapeHtml(i.name)}</b> &middot; <a href="mailto:${escapeHtml(i.email)}" style="color:var(--blue-dark);">${escapeHtml(i.email)}</a>${i.phone ? ' &middot; ' + escapeHtml(i.phone) : ''}${i.social ? ' &middot; ' + escapeHtml(i.social) : ''}
+          </div>
+          ${i.message ? `<div class="card-meta" style="margin-top:4px;">${escapeHtml(i.message)}</div>` : ''}
+          <div class="card-meta" style="margin-top:4px;">${timeAgo(i.created_at)}</div>
+        </div>
+      </div>
+    `;
   }
 
   async function renderBarberDashboard() {
@@ -875,5 +1016,6 @@ const App = (() => {
     nav, searchSubmit, doLogin, doSignup, setSignupRole, logout,
     sendRequest, toggleActive, saveListing, showOwnerTab, updateRequest,
     sendMessage, stepNext, stepBack, handlePhotoSelect, removeNewPhoto,
+    heroNext, heroPrev, heroGoTo, openContactModal, closeContactModal, submitInquiry,
   };
 })();
