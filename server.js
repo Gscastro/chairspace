@@ -378,6 +378,56 @@ route('GET', '/api/my-listings', async (req, res) => {
   send(res, 200, { listings: rows.map(publicListing) });
 });
 
+// --- Inquiries (no-login "Contact Owner" leads) ---
+
+route('POST', '/api/listings/:id/inquiries', async (req, res, params) => {
+  const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id);
+  if (!listing) return send(res, 404, { error: 'Listing not found' });
+
+  const body = await readBody(req);
+  const { name, email, phone, social, message } = body;
+  if (!name || !name.trim()) return send(res, 400, { error: 'Name is required' });
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    return send(res, 400, { error: 'A valid email is required' });
+  }
+
+  const info = db.prepare(`
+    INSERT INTO inquiries (listing_id, name, email, phone, social, message, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(params.id, name.trim(), email.trim(), phone || '', social || '', message || '', new Date().toISOString());
+
+  const created = db.prepare('SELECT * FROM inquiries WHERE id = ?').get(Number(info.lastInsertRowid));
+  send(res, 201, { inquiry: created });
+});
+
+route('GET', '/api/inquiries/received', async (req, res) => {
+  const user = getSessionUser(req);
+  if (!user) return send(res, 401, { error: 'Not logged in' });
+  if (user.role !== 'owner') return send(res, 403, { error: 'Only space owners receive inquiries' });
+
+  const rows = db.prepare(`
+    SELECT i.* FROM inquiries i
+    JOIN listings l ON i.listing_id = l.id
+    WHERE l.owner_id = ?
+    ORDER BY i.created_at DESC
+  `).all(user.id);
+
+  const inquiries = rows.map((row) => {
+    const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
+    return {
+      id: row.id,
+      name: row.name,
+      email: row.email,
+      phone: row.phone,
+      social: row.social,
+      message: row.message,
+      created_at: row.created_at,
+      listing: listing ? publicListing(listing) : null,
+    };
+  });
+  send(res, 200, { inquiries });
+});
+
 // --- Requests (rental requests) ---
 
 route('POST', '/api/requests', async (req, res) => {

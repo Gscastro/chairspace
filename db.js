@@ -73,6 +73,18 @@ db.exec(`
     FOREIGN KEY(request_id) REFERENCES requests(id),
     FOREIGN KEY(sender_id) REFERENCES users(id)
   );
+
+  CREATE TABLE IF NOT EXISTS inquiries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL,
+    phone TEXT,
+    social TEXT,
+    message TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(listing_id) REFERENCES listings(id)
+  );
 `);
 
 function hashPassword(password, salt) {
