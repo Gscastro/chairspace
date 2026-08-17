@@ -1,6 +1,7 @@
 // server.js — ChairSpace API + static server. Pure Node built-ins, no npm deps.
 
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -8,6 +9,56 @@ const { db, hashPassword } = require('./db');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const PUBLIC_URL = process.env.PUBLIC_URL || 'https://chairspace.onrender.com';
+
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// ---------- email notifications (Resend) ----------
+// Fire-and-forget: never throws, never blocks the API response. Skips silently
+// (just logs) if RESEND_API_KEY isn't set yet, so this is safe to deploy before
+// the key is configured.
+function sendEmail({ to, subject, html }) {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey || !to) {
+    console.log(`[email skipped] to=${to || '(none)'} subject=${subject}`);
+    return Promise.resolve();
+  }
+  const from = process.env.RESEND_FROM || 'ChairSpace <onboarding@resend.dev>';
+  const payload = JSON.stringify({ from, to, subject, html });
+  return new Promise((resolve) => {
+    const req = https.request(
+      {
+        hostname: 'api.resend.com',
+        path: '/emails',
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => {
+          if (res.statusCode >= 400) console.error(`[email failed ${res.statusCode}] ${body}`);
+          resolve();
+        });
+      }
+    );
+    req.on('error', (e) => {
+      console.error('[email error]', e.message);
+      resolve();
+    });
+    req.write(payload);
+    req.end();
+  });
+}
 
 // ---------- helpers ----------
 
@@ -398,6 +449,17 @@ route('POST', '/api/listings/:id/inquiries', async (req, res, params) => {
 
   const created = db.prepare('SELECT * FROM inquiries WHERE id = ?').get(Number(info.lastInsertRowid));
   send(res, 201, { inquiry: created });
+
+  const owner = db.prepare('SELECT * FROM users WHERE id = ?').get(listing.owner_id);
+  if (owner) {
+    sendEmail({
+      to: owner.email,
+      subject: `New inquiry about "${listing.title}" — ChairSpace`,
+      html: `<p><b>${escapeHtml(name.trim())}</b> (${escapeHtml(email.trim())}${phone ? ', ' + escapeHtml(phone) : ''}) is interested in "${escapeHtml(listing.title)}".</p>
+        ${message ? `<p>${escapeHtml(message)}</p>` : ''}
+        <p><a href="${PUBLIC_URL}/dashboard">View it on ChairSpace</a></p>`,
+    });
+  }
 });
 
 route('GET', '/api/inquiries/received', async (req, res) => {
@@ -454,6 +516,17 @@ route('POST', '/api/requests', async (req, res) => {
   }
   const created = db.prepare('SELECT * FROM requests WHERE id = ?').get(reqId);
   send(res, 201, { request: created });
+
+  const owner = db.prepare('SELECT * FROM users WHERE id = ?').get(listing.owner_id);
+  if (owner) {
+    sendEmail({
+      to: owner.email,
+      subject: `New rental request for "${listing.title}" — ChairSpace`,
+      html: `<p><b>${escapeHtml(user.name)}</b> wants to rent your listing "${escapeHtml(listing.title)}".</p>
+        ${message ? `<p>${escapeHtml(message)}</p>` : ''}
+        <p><a href="${PUBLIC_URL}/dashboard">View it on ChairSpace</a></p>`,
+    });
+  }
 });
 
 function enrichRequest(row) {
@@ -520,6 +593,18 @@ route('PATCH', '/api/requests/:id', async (req, res, params) => {
   db.prepare('UPDATE requests SET status = ? WHERE id = ?').run(status, params.id);
   const updated = db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
   send(res, 200, { request: enrichRequest(updated) });
+
+  if (['approved', 'declined'].includes(status)) {
+    const barber = db.prepare('SELECT * FROM users WHERE id = ?').get(row.barber_id);
+    if (barber) {
+      sendEmail({
+        to: barber.email,
+        subject: `Your request was ${status} — ChairSpace`,
+        html: `<p>Your rental request for "${escapeHtml(listing ? listing.title : 'a ChairSpace listing')}" was <b>${status}</b>.</p>
+          <p><a href="${PUBLIC_URL}/dashboard">View it on ChairSpace</a></p>`,
+      });
+    }
+  }
 });
 
 // --- Messaging ---
@@ -558,6 +643,19 @@ route('POST', '/api/requests/:id/messages', async (req, res, params) => {
   const m = db.prepare('SELECT * FROM messages WHERE id = ?').get(Number(info.lastInsertRowid));
   const sender = db.prepare('SELECT id, name FROM users WHERE id = ?').get(user.id);
   send(res, 201, { message: { id: m.id, body: m.body, created_at: m.created_at, sender } });
+
+  const otherUserId = row.barber_id === user.id ? (listing ? listing.owner_id : null) : row.barber_id;
+  if (otherUserId) {
+    const other = db.prepare('SELECT * FROM users WHERE id = ?').get(otherUserId);
+    if (other) {
+      sendEmail({
+        to: other.email,
+        subject: `New message from ${user.name} — ChairSpace`,
+        html: `<p><b>${escapeHtml(user.name)}</b>: ${escapeHtml(body.body.trim())}</p>
+          <p><a href="${PUBLIC_URL}/requests/${params.id}">Reply on ChairSpace</a></p>`,
+      });
+    }
+  }
 });
 
 // ---------- static file serving ----------
@@ -583,8 +681,8 @@ function serveStatic(req, res, pathname) {
     res.writeHead(403);
     return res.end('Forbidden');
   }
-  fs.readFile(filePath, (err, data) => {
-    if (err) {
+  fs.stat(filePath, (statErr, stat) => {
+    if (statErr || !stat.isFile()) {
       // SPA fallback: serve index.html for unknown non-api routes
       fs.readFile(path.join(PUBLIC_DIR, 'index.html'), (err2, data2) => {
         if (err2) {
@@ -596,10 +694,125 @@ function serveStatic(req, res, pathname) {
       });
       return;
     }
+    // Uploaded photos have unique, never-reused filenames, so they're safe to
+    // cache "forever". CSS/JS/HTML aren't filename-versioned, so we always
+    // revalidate (ETag) rather than risk serving a stale asset after a deploy.
+    const isUpload = pathname.startsWith('/uploads/');
+    const etag = `"${stat.size}-${Math.round(stat.mtimeMs)}"`;
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, { ETag: etag });
+      return res.end();
+    }
     const ext = path.extname(filePath);
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
-    res.end(data);
+    fs.readFile(filePath, (err, data) => {
+      if (err) {
+        res.writeHead(404);
+        return res.end('Not found');
+      }
+      res.writeHead(200, {
+        'Content-Type': MIME[ext] || 'application/octet-stream',
+        ETag: etag,
+        'Cache-Control': isUpload ? 'public, max-age=31536000, immutable' : 'no-cache',
+      });
+      res.end(data);
+    });
   });
+}
+
+// ---------- server-rendered listing pages (real URLs, crawlable by Google) ----------
+
+function renderListingPage(req, listing) {
+  const host = req.headers.host || 'chairspace.onrender.com';
+  const base = `https://${host}`;
+  const url = `${base}/listing/${listing.id}`;
+  const photos = (listing.photos || []).map((p) => (p.startsWith('http') ? p : base + p));
+  const priceLabel = `$${listing.price}/${listing.price_unit}`;
+  const title = `${listing.title} — ${listing.city}, ${listing.state} | ChairSpace`;
+  const rawDesc = listing.description || `${listing.chair_type} for rent in ${listing.city}, ${listing.state} — ${priceLabel}.`;
+  const desc = rawDesc.length > 160 ? rawDesc.slice(0, 157) + '...' : rawDesc;
+  const heroImg = photos[0] || '';
+  const jsonLd = {
+    '@context': 'https://schema.org',
+    '@type': 'Product',
+    name: listing.title,
+    description: rawDesc,
+    ...(photos.length ? { image: photos } : {}),
+    offers: {
+      '@type': 'Offer',
+      price: listing.price,
+      priceCurrency: 'USD',
+      availability: listing.active ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock',
+      url,
+    },
+  };
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>${escapeHtml(title)}</title>
+<meta name="description" content="${escapeHtml(desc)}" />
+<link rel="canonical" href="${url}" />
+<meta property="og:type" content="product" />
+<meta property="og:title" content="${escapeHtml(title)}" />
+<meta property="og:description" content="${escapeHtml(desc)}" />
+${heroImg ? `<meta property="og:image" content="${escapeHtml(heroImg)}" />\n` : ''}<meta property="og:url" content="${url}" />
+<script type="application/ld+json">${JSON.stringify(jsonLd)}</script>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="site">
+    <div class="container">
+      <div class="logo" onclick="App.nav('/')">Chair<span>Space</span></div>
+      <nav class="main" id="nav"></nav>
+    </div>
+  </header>
+  <main>
+    <div class="container" id="app">
+      <div class="detail-grid">
+        <div>
+          ${heroImg ? `<div class="hero-wrap"><img class="hero-img" src="${escapeHtml(heroImg)}" alt="${escapeHtml(listing.title)}" /></div>` : ''}
+          <h1>${escapeHtml(listing.title)}</h1>
+          <p class="card-meta">${escapeHtml(listing.city)}, ${escapeHtml(listing.state)}${listing.total_chairs ? ' &middot; ' + listing.total_chairs + '-chair shop' : ''}</p>
+          <p>${escapeHtml(listing.description || '')}</p>
+        </div>
+        <div>
+          <div class="side-card">
+            <div class="price-tag">${priceLabel}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+  <footer class="site">
+    <div class="container">
+      ChairSpace — a prototype marketplace connecting barbers with open chairs, booths, and suites to rent.
+    </div>
+  </footer>
+  <div id="modal-root"></div>
+  <script src="/app.js"></script>
+</body>
+</html>`;
+}
+
+function buildSitemap(req) {
+  const host = req.headers.host || 'chairspace.onrender.com';
+  const base = `https://${host}`;
+  const rows = db.prepare('SELECT id, created_at FROM listings WHERE active = 1').all();
+  let xml = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n';
+  xml += `  <url>\n    <loc>${base}/</loc>\n  </url>\n`;
+  for (const r of rows) {
+    xml += `  <url>\n    <loc>${base}/listing/${r.id}</loc>\n`;
+    if (r.created_at) xml += `    <lastmod>${r.created_at.slice(0, 10)}</lastmod>\n`;
+    xml += `  </url>\n`;
+  }
+  xml += '</urlset>';
+  return xml;
+}
+
+function buildRobots(req) {
+  const host = req.headers.host || 'chairspace.onrender.com';
+  return `User-agent: *\nAllow: /\nSitemap: https://${host}/sitemap.xml\n`;
 }
 
 // ---------- main request handler ----------
@@ -610,6 +823,24 @@ const server = http.createServer(async (req, res) => {
   const query = Object.fromEntries(parsedUrl.searchParams.entries());
 
   if (!pathname.startsWith('/api/')) {
+    if (req.method === 'GET' && pathname === '/sitemap.xml') {
+      res.writeHead(200, { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
+      return res.end(buildSitemap(req));
+    }
+    if (req.method === 'GET' && pathname === '/robots.txt') {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
+      return res.end(buildRobots(req));
+    }
+    const listingMatch = pathname.match(/^\/listing\/(\d+)\/?$/);
+    if (req.method === 'GET' && listingMatch) {
+      const row = db.prepare('SELECT * FROM listings WHERE id = ?').get(listingMatch[1]);
+      if (!row) {
+        res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+        return res.end('<!DOCTYPE html><title>Not found — ChairSpace</title><h1>Listing not found</h1><p><a href="/">Back to ChairSpace</a></p>');
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+      return res.end(renderListingPage(req, publicListing(row)));
+    }
     return serveStatic(req, res, pathname);
   }
 
