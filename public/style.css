@@ -281,6 +281,7 @@ h2.section-title { font-size: 1.4rem; margin: 46px 0 18px; font-weight: 800; let
 }
 .card {
   display: block;
+  position: relative;
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -291,6 +292,42 @@ h2.section-title { font-size: 1.4rem; margin: 46px 0 18px; font-weight: 800; let
   color: inherit;
   text-decoration: none;
 }
+
+/* favorites */
+.favorite-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(18, 22, 31, 0.45);
+  color: #fff;
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, transform 0.1s;
+}
+.favorite-btn:hover { background: rgba(18, 22, 31, 0.68); transform: scale(1.08); }
+.favorite-btn.active { color: var(--red); background: rgba(255, 255, 255, 0.9); }
+.favorite-btn.detail {
+  position: static;
+  width: 40px;
+  height: 40px;
+  background: var(--blue-light);
+  color: var(--blue-dark);
+  font-size: 1.3rem;
+  flex-shrink: 0;
+}
+.favorite-btn.detail.active { color: var(--red); background: var(--red-tint); }
+
+.price-tag-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.cancellation-note { margin: 6px 0 0; }
 .card:hover { box-shadow: var(--shadow); transform: translateY(-2px); border-color: #d3d8e0; }
 .photo-wrap {
   position: relative;
@@ -637,3 +674,36 @@ footer.site {
 }
 
 .spinner-note { color: var(--muted); padding: 30px; text-align: center; }
+
+/* map embed on listing detail */
+.map-embed {
+  margin-top: 18px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+}
+.map-embed iframe { width: 100%; height: 260px; border: none; display: block; }
+
+/* reviews */
+.review-avg { display: flex; align-items: center; gap: 8px; margin: 4px 0 14px; color: #d8a300; font-size: 1.1rem; }
+.review-list { display: flex; flex-direction: column; gap: 12px; }
+.review-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+}
+.review-stars { color: #d8a300; font-size: 1rem; letter-spacing: 1px; margin-bottom: 4px; }
+.review-card p { margin: 6px 0; }
+
+.star-picker { display: flex; gap: 4px; }
+.star-pick {
+  background: none;
+  border: none;
+  font-size: 1.6rem;
+  color: #d8a300;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}

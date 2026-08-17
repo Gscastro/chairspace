@@ -5,6 +5,13 @@ const App = (() => {
     token: localStorage.getItem('chairspace_token') || null,
     user: null,
     booting: true,
+    favoriteIds: new Set(),
+  };
+
+  const POLICY_INFO = {
+    flexible: { label: 'Flexible', desc: 'Can cancel anytime before the start date, no hard feelings.' },
+    standard: { label: 'Standard', desc: 'Please give at least a few days notice if you need to cancel.' },
+    strict: { label: 'Strict', desc: 'Once approved, treat this as a firm commitment — last-minute cancellations affect the shop.' },
   };
 
   const $app = () => document.getElementById('app');
@@ -180,6 +187,7 @@ const App = (() => {
             Available now only
           </label>
           <button class="pill-btn" type="submit">Search</button>
+          ${state.user && state.user.role === 'barber' ? `<button type="button" class="pill-btn ghost" onclick="App.saveCurrentSearch()">🔔 Save this search</button>` : ''}
         </form>
       </div>
 
@@ -229,11 +237,44 @@ const App = (() => {
     }
   }
 
+  function heartButtonHtml(listingId) {
+    if (!state.user || state.user.role !== 'barber') return '';
+    const active = state.favoriteIds.has(listingId) || state.favoriteIds.has(Number(listingId));
+    return `<button type="button" class="favorite-btn${active ? ' active' : ''}" data-listing-id="${listingId}" onclick="App.toggleFavorite(event, ${listingId})" aria-label="${active ? 'Remove from favorites' : 'Save to favorites'}" aria-pressed="${active}">${active ? '♥' : '♡'}</button>`;
+  }
+
+  async function toggleFavorite(evt, listingId) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    if (!state.user || state.user.role !== 'barber') return;
+    const btn = evt.currentTarget;
+    const isActive = state.favoriteIds.has(listingId);
+    try {
+      if (isActive) {
+        await api('/api/favorites/' + listingId, { method: 'DELETE' });
+        state.favoriteIds.delete(listingId);
+      } else {
+        await api('/api/favorites', { method: 'POST', body: { listing_id: listingId } });
+        state.favoriteIds.add(listingId);
+      }
+      const nowActive = state.favoriteIds.has(listingId);
+      if (btn) {
+        btn.classList.toggle('active', nowActive);
+        btn.textContent = nowActive ? '♥' : '♡';
+        btn.setAttribute('aria-pressed', String(nowActive));
+        btn.setAttribute('aria-label', nowActive ? 'Remove from favorites' : 'Save to favorites');
+      }
+    } catch (e) {
+      alert(e.message);
+    }
+  }
+
   function listingCard(l) {
     const avail = availabilityLabel(l.available_from);
     return `
       <a class="card" href="/listing/${l.id}" onclick="event.preventDefault(); App.nav('/listing/${l.id}');">
         ${photoBlock(l, { alt: l.title })}
+        ${heartButtonHtml(l.id)}
         <div class="card-body">
           <div class="card-tags">
             <span class="badge">${escapeHtml(l.chair_type)}</span>
@@ -245,6 +286,31 @@ const App = (() => {
         </div>
       </a>
     `;
+  }
+
+  async function saveCurrentSearch() {
+    if (!state.user || state.user.role !== 'barber') return;
+    const { query } = parseLocation();
+    if (!query.city && !query.chair_type && !query.price_unit && !query.max_price) {
+      alert('Add at least one filter (city, space type, billing period, or max price) before saving.');
+      return;
+    }
+    const labelParts = [query.city, query.chair_type, query.max_price ? 'under ' + money(query.max_price) : ''].filter(Boolean);
+    try {
+      await api('/api/saved-searches', {
+        method: 'POST',
+        body: {
+          label: labelParts.join(' · ') || 'My search',
+          city: query.city || null,
+          chair_type: query.chair_type || null,
+          price_unit: query.price_unit || null,
+          max_price: query.max_price || null,
+        },
+      });
+      alert("Saved! We'll email you when a new listing matches.");
+    } catch (e) {
+      alert(e.message);
+    }
   }
 
   function searchSubmit(evt) {
@@ -300,6 +366,46 @@ const App = (() => {
     return `<div class="hero-wrap">${mediaHtml}${overlay}</div>`;
   }
 
+  // Free OpenStreetMap embed — no API key needed. Lat/lon are geocoded
+  // server-side from the listing's address when it's created or edited.
+  function mapEmbedHtml(l) {
+    if (l.lat == null || l.lon == null) return '';
+    const d = 0.01;
+    const bbox = [l.lon - d, l.lat - d, l.lon + d, l.lat + d].join('%2C');
+    const src = `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${l.lat}%2C${l.lon}`;
+    return `<div class="map-embed"><iframe src="${src}" loading="lazy" title="Map of ${escapeHtml(l.city)}, ${escapeHtml(l.state)}"></iframe></div>`;
+  }
+
+  function star(n) { return '★'.repeat(n) + '☆'.repeat(5 - n); }
+
+  async function loadListingReviews(listingId) {
+    const el = document.getElementById('listing-reviews');
+    if (!el) return;
+    try {
+      const { reviews, average, count } = await api('/api/listings/' + listingId + '/reviews');
+      if (!document.getElementById('listing-reviews')) return; // navigated away
+      if (count === 0) {
+        el.innerHTML = '';
+        return;
+      }
+      el.innerHTML = `
+        <h3>Reviews <span class="card-meta">(${count})</span></h3>
+        <div class="review-avg">${star(Math.round(average))} <span class="card-meta">${average.toFixed(1)} average</span></div>
+        <div class="review-list">
+          ${reviews.map(r => `
+            <div class="review-card">
+              <div class="review-stars">${star(r.rating)}</div>
+              ${r.comment ? `<p>${escapeHtml(r.comment)}</p>` : ''}
+              <div class="card-meta">${escapeHtml(r.author ? r.author.name : 'A barber')} &middot; ${timeAgo(r.created_at)}</div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    } catch (e) {
+      // non-critical — leave the section empty rather than showing an error
+    }
+  }
+
   function updateHeroSlide() {
     const img = document.getElementById('hero-slide-img');
     if (img && heroState.photos.length) img.src = heroState.photos[heroState.index];
@@ -343,17 +449,23 @@ const App = (() => {
           ${heroSectionHtml(l)}
           <div class="card-meta" style="margin-top:14px;">${escapeHtml(l.address ? l.address + ', ' : '')}${escapeHtml(l.city)}, ${escapeHtml(l.state)} ${escapeHtml(l.zip || '')}${l.total_chairs ? ' &middot; ' + l.total_chairs + '-chair shop' : ''}</div>
           <p>${escapeHtml(l.description || 'No description provided.')}</p>
+          ${mapEmbedHtml(l)}
           <h3>Hosted by</h3>
           <p class="card-meta">${escapeHtml(l.owner.name)}${l.owner.bio ? ' — ' + escapeHtml(l.owner.bio) : ''}</p>
         </div>
         <div>
           <div class="side-card">
-            <div class="price-tag">${money(l.price)}${unitLabel(l.price_unit)}</div>
+            <div class="price-tag-row">
+              <div class="price-tag">${money(l.price)}${unitLabel(l.price_unit)}</div>
+              ${canRequest ? `<button type="button" class="favorite-btn detail${state.favoriteIds.has(l.id) ? ' active' : ''}" onclick="App.toggleFavorite(event, ${l.id})" aria-label="${state.favoriteIds.has(l.id) ? 'Remove from favorites' : 'Save to favorites'}" aria-pressed="${state.favoriteIds.has(l.id)}">${state.favoriteIds.has(l.id) ? '♥' : '♡'}</button>` : ''}
+            </div>
+            <p class="card-meta cancellation-note"><b>${POLICY_INFO[l.cancellation_policy] ? POLICY_INFO[l.cancellation_policy].label : 'Standard'} cancellation</b> — ${escapeHtml(POLICY_INFO[l.cancellation_policy] ? POLICY_INFO[l.cancellation_policy].desc : POLICY_INFO.standard.desc)}</p>
             ${!isOwnerOfThis ? `<button class="pill-btn contact-owner-btn" type="button" onclick="App.openContactModal(${l.id})">Contact Owner</button>` : ''}
             <div id="request-area" style="margin-top:14px;"></div>
           </div>
         </div>
       </div>
+      <div id="listing-reviews"></div>
     `;
 
     const area = document.getElementById('request-area');
@@ -384,6 +496,8 @@ const App = (() => {
     } else {
       area.innerHTML = `<p class="card-meta">Space owner accounts can't request other listings — log in as a barber to request this spot.</p>`;
     }
+
+    loadListingReviews(l.id);
   }
 
   async function toggleActive(id, currentlyActive) {
@@ -502,6 +616,7 @@ const App = (() => {
       state.token = data.token;
       state.user = data.user;
       localStorage.setItem('chairspace_token', data.token);
+      await loadFavoriteIds();
       nav('/dashboard');
     } catch (e) {
       msgEl.innerHTML = `<p class="msg">${escapeHtml(e.message)}</p>`;
@@ -523,6 +638,14 @@ const App = (() => {
           <div class="field"><label>Password</label><input type="password" name="password" required minlength="6" /></div>
           <div class="field"><label>Phone (optional)</label><input type="tel" name="phone" /></div>
           <div class="field"><label>Short bio (optional)</label><textarea name="bio" placeholder="${signupRole === 'owner' ? 'Tell barbers about your shop...' : 'Tell shop owners about your experience...'}"></textarea></div>
+          <div id="license-fields" ${signupRole === 'owner' ? 'hidden' : ''}>
+            <p class="card-meta" style="margin:0 0 8px;">Optional for now — having it on file is a first step toward a trust badge later.</p>
+            <div class="row-2">
+              <div class="field"><label>Barber license #</label><input type="text" name="license_number" /></div>
+              <div class="field"><label>License state</label><input type="text" name="license_state" maxlength="2" placeholder="TX" /></div>
+            </div>
+            <div class="field"><label>License expiration</label><input type="date" name="license_expiration" /></div>
+          </div>
           <button class="pill-btn" type="submit">Create account</button>
           <div id="auth-msg"></div>
         </form>
@@ -535,6 +658,10 @@ const App = (() => {
     signupRole = role;
     document.getElementById('role-barber').classList.toggle('active', role === 'barber');
     document.getElementById('role-owner').classList.toggle('active', role === 'owner');
+    const licenseFields = document.getElementById('license-fields');
+    if (licenseFields) licenseFields.hidden = role !== 'barber';
+    const bioField = document.querySelector('#app textarea[name="bio"]');
+    if (bioField) bioField.placeholder = role === 'owner' ? 'Tell barbers about your shop...' : 'Tell shop owners about your experience...';
   }
 
   async function doSignup(evt) {
@@ -547,11 +674,14 @@ const App = (() => {
         body: {
           name: f.get('name'), email: f.get('email'), password: f.get('password'),
           role: signupRole, phone: f.get('phone'), bio: f.get('bio'),
+          license_number: f.get('license_number') || '', license_state: f.get('license_state') || '',
+          license_expiration: f.get('license_expiration') || '',
         },
       });
       state.token = data.token;
       state.user = data.user;
       localStorage.setItem('chairspace_token', data.token);
+      await loadFavoriteIds();
       nav(signupRole === 'owner' ? '/post-listing' : '/');
     } catch (e) {
       msgEl.innerHTML = `<p class="msg">${escapeHtml(e.message)}</p>`;
@@ -562,6 +692,7 @@ const App = (() => {
     api('/api/logout', { method: 'POST' }).catch(() => {});
     state.token = null;
     state.user = null;
+    state.favoriteIds = new Set();
     localStorage.removeItem('chairspace_token');
     nav('/');
   }
@@ -639,6 +770,13 @@ const App = (() => {
             </div>
           </div>
           <div class="field"><label>Available from (leave blank if available now)</label><input type="date" name="available_from" value="${escapeHtml(e.available_from || '')}" /></div>
+          <div class="field"><label>Cancellation policy</label>
+            <select name="cancellation_policy">
+              <option value="flexible" ${e.cancellation_policy === 'flexible' ? 'selected' : ''}>Flexible — ${POLICY_INFO.flexible.desc}</option>
+              <option value="standard" ${!e.cancellation_policy || e.cancellation_policy === 'standard' ? 'selected' : ''}>Standard — ${POLICY_INFO.standard.desc}</option>
+              <option value="strict" ${e.cancellation_policy === 'strict' ? 'selected' : ''}>Strict — ${POLICY_INFO.strict.desc}</option>
+            </select>
+          </div>
         </div>
 
         <div class="step-panel" data-panel="3" hidden>
@@ -831,6 +969,7 @@ const App = (() => {
       price: Number(f.get('price')), price_unit: f.get('price_unit'), chair_type: f.get('chair_type'),
       available_from: f.get('available_from') || null,
       total_chairs: f.get('total_chairs') || null,
+      cancellation_policy: f.get('cancellation_policy') || 'standard',
     };
     try {
       let listing;
@@ -930,19 +1069,78 @@ const App = (() => {
 
   async function renderBarberDashboard() {
     $app().innerHTML = `
-      <h1>My Requests</h1>
+      <h1>My Dashboard</h1>
+      <div class="tabs">
+        <button id="tab-requests" class="active" onclick="App.showBarberTab('requests')">My Requests</button>
+        <button id="tab-favorites" onclick="App.showBarberTab('favorites')">Favorites</button>
+        <button id="tab-saved-searches" onclick="App.showBarberTab('saved-searches')">Saved Searches</button>
+      </div>
       <div id="tab-content"><p class="spinner-note">Loading...</p></div>
     `;
+    showBarberTab('requests');
+  }
+
+  let lastBarberTab = 'requests';
+  async function showBarberTab(tab) {
+    lastBarberTab = tab;
+    document.getElementById('tab-requests').classList.toggle('active', tab === 'requests');
+    document.getElementById('tab-favorites').classList.toggle('active', tab === 'favorites');
+    document.getElementById('tab-saved-searches').classList.toggle('active', tab === 'saved-searches');
     const content = document.getElementById('tab-content');
+    content.innerHTML = `<p class="spinner-note">Loading...</p>`;
     try {
-      const { requests } = await api('/api/requests/sent');
-      if (requests.length === 0) {
-        content.innerHTML = `<div class="empty-state">You haven't requested any chairs yet.<br/><button class="pill-btn" style="margin-top:12px;" onclick="App.nav('/')">Browse listings</button></div>`;
-        return;
+      if (tab === 'requests') {
+        const { requests } = await api('/api/requests/sent');
+        if (requests.length === 0) {
+          content.innerHTML = `<div class="empty-state">You haven't requested any chairs yet.<br/><button class="pill-btn" style="margin-top:12px;" onclick="App.nav('/')">Browse listings</button></div>`;
+          return;
+        }
+        content.innerHTML = requests.map(requestRow('barber')).join('');
+      } else if (tab === 'favorites') {
+        const { listings } = await api('/api/favorites');
+        if (listings.length === 0) {
+          content.innerHTML = `<div class="empty-state">No favorites yet. Tap the heart on any listing to save it here.</div>`;
+          return;
+        }
+        content.innerHTML = `<div class="grid">${listings.map(listingCard).join('')}</div>`;
+      } else {
+        const { searches } = await api('/api/saved-searches');
+        if (searches.length === 0) {
+          content.innerHTML = `<div class="empty-state">No saved searches yet. Search on the home page, then tap "Save this search" to get emailed when a new chair matches.</div>`;
+          return;
+        }
+        content.innerHTML = searches.map(savedSearchRow).join('');
       }
-      content.innerHTML = requests.map(requestRow('barber')).join('');
     } catch (e) {
       content.innerHTML = `<p class="msg">${escapeHtml(e.message)}</p>`;
+    }
+  }
+
+  function savedSearchRow(s) {
+    const parts = [];
+    if (s.city) parts.push(s.city);
+    if (s.chair_type) parts.push(s.chair_type);
+    if (s.price_unit) parts.push(unitLabel(s.price_unit).replace('/', 'per '));
+    if (s.max_price) parts.push('under ' + money(s.max_price));
+    return `
+      <div class="request-row">
+        <div class="info">
+          <div style="font-weight:700;">${escapeHtml(s.label || 'Saved search')}</div>
+          <div class="card-meta">${escapeHtml(parts.join(' · ') || 'Any listing')}</div>
+        </div>
+        <div class="actions">
+          <button class="pill-btn ghost small" onclick="App.deleteSavedSearch(${s.id})">Delete</button>
+        </div>
+      </div>
+    `;
+  }
+
+  async function deleteSavedSearch(id) {
+    try {
+      await api('/api/saved-searches/' + id, { method: 'DELETE' });
+      showBarberTab('saved-searches');
+    } catch (e) {
+      alert(e.message);
     }
   }
 
@@ -980,6 +1178,8 @@ const App = (() => {
       const { path } = parseLocation();
       if (path === '/dashboard' && state.user.role === 'owner') {
         showOwnerTab(lastOwnerTab);
+      } else if (path === '/dashboard' && state.user.role === 'barber') {
+        showBarberTab(lastBarberTab);
       } else if (path.startsWith('/requests/')) {
         renderThread(id);
       } else {
@@ -1028,7 +1228,81 @@ const App = (() => {
         <textarea name="body" placeholder="Write a message..." required style="padding:10px 12px;border:1px solid var(--line);border-radius:6px;font-family:inherit;min-height:60px;"></textarea>
         <button class="pill-btn" type="submit" style="align-self:flex-start;">Send</button>
       </form>
+      <div id="review-area" style="max-width:560px; margin-top:20px;"></div>
     `;
+
+    if (r && r.status === 'approved') loadThreadReview(id);
+  }
+
+  async function loadThreadReview(requestId) {
+    const el = document.getElementById('review-area');
+    if (!el) return;
+    try {
+      const data = await api('/api/requests/' + requestId + '/reviews');
+      if (!document.getElementById('review-area')) return;
+      if (data.canReview) {
+        el.innerHTML = `
+          <div class="card auth" style="padding:20px;">
+            <h3 style="margin-top:0;">Leave a review</h3>
+            <p class="card-meta">You won't see their review (if they leave one) until you've submitted yours.</p>
+            <form class="stack" onsubmit="App.submitReview(event, ${requestId})">
+              <div class="field"><label>Rating</label>
+                <div class="star-picker" id="star-picker">
+                  ${[1,2,3,4,5].map(n => `<button type="button" class="star-pick" data-val="${n}" onclick="App.pickStar(${n})">☆</button>`).join('')}
+                </div>
+                <input type="hidden" name="rating" id="rating-input" value="" />
+              </div>
+              <div class="field"><label>Comment (optional)</label><textarea name="comment" placeholder="How did it go?"></textarea></div>
+              <button class="pill-btn" type="submit">Submit review</button>
+              <div id="review-msg"></div>
+            </form>
+          </div>
+        `;
+      } else if (data.myReview) {
+        el.innerHTML = `
+          <div class="card auth" style="padding:20px;">
+            <h3 style="margin-top:0;">Your review</h3>
+            <div class="review-stars">${star(data.myReview.rating)}</div>
+            ${data.myReview.comment ? `<p>${escapeHtml(data.myReview.comment)}</p>` : ''}
+            ${data.bothSubmitted && data.otherReview ? `
+              <h3>Their review</h3>
+              <div class="review-stars">${star(data.otherReview.rating)}</div>
+              ${data.otherReview.comment ? `<p>${escapeHtml(data.otherReview.comment)}</p>` : ''}
+            ` : `<p class="card-meta">You'll see their review once they've left one too.</p>`}
+          </div>
+        `;
+      } else {
+        el.innerHTML = '';
+      }
+    } catch (e) {
+      el.innerHTML = '';
+    }
+  }
+
+  function pickStar(n) {
+    document.getElementById('rating-input').value = n;
+    document.querySelectorAll('.star-pick').forEach((btn) => {
+      const val = Number(btn.dataset.val);
+      btn.textContent = val <= n ? '★' : '☆';
+      btn.classList.toggle('active', val <= n);
+    });
+  }
+
+  async function submitReview(evt, requestId) {
+    evt.preventDefault();
+    const f = new FormData(evt.target);
+    const msgEl = document.getElementById('review-msg');
+    const rating = Number(f.get('rating'));
+    if (!rating) {
+      if (msgEl) msgEl.innerHTML = `<p class="msg">Pick a star rating first.</p>`;
+      return;
+    }
+    try {
+      await api('/api/requests/' + requestId + '/reviews', { method: 'POST', body: { rating, comment: f.get('comment') || '' } });
+      loadThreadReview(requestId);
+    } catch (e) {
+      if (msgEl) msgEl.innerHTML = `<p class="msg">${escapeHtml(e.message)}</p>`;
+    }
   }
 
   async function sendMessage(evt, requestId) {
@@ -1047,6 +1321,16 @@ const App = (() => {
   }
 
   // ---------- boot ----------
+  async function loadFavoriteIds() {
+    if (!state.user || state.user.role !== 'barber') { state.favoriteIds = new Set(); return; }
+    try {
+      const { listing_ids } = await api('/api/favorites/ids');
+      state.favoriteIds = new Set(listing_ids);
+    } catch (e) {
+      state.favoriteIds = new Set();
+    }
+  }
+
   async function boot() {
     if (state.token) {
       try {
@@ -1057,6 +1341,7 @@ const App = (() => {
         localStorage.removeItem('chairspace_token');
       }
     }
+    await loadFavoriteIds();
     state.booting = false;
     window.addEventListener('popstate', router);
     router();
@@ -1069,6 +1354,7 @@ const App = (() => {
     sendRequest, toggleActive, saveListing, showOwnerTab, updateRequest,
     sendMessage, stepNext, stepBack, handlePhotoSelect, removeNewPhoto,
     heroNext, heroPrev, heroGoTo, openContactModal, closeContactModal, submitInquiry,
-    toggleMenu,
+    toggleMenu, toggleFavorite, showBarberTab, saveCurrentSearch, deleteSavedSearch,
+    pickStar, submitReview,
   };
 })();
