@@ -764,6 +764,9 @@ ${heroImg ? `<meta property="og:image" content="${escapeHtml(heroImg)}" />\n` : 
   <header class="site">
     <div class="container">
       <div class="logo" onclick="App.nav('/')">Chair<span>Space</span></div>
+      <button type="button" class="menu-toggle" id="menu-toggle" onclick="App.toggleMenu()" aria-label="Menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
       <nav class="main" id="nav"></nav>
     </div>
   </header>
