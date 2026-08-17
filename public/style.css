@@ -218,6 +218,7 @@ h2.section-title { font-size: 1.4rem; margin: 46px 0 18px; font-weight: 800; let
   gap: 16px;
 }
 .card {
+  display: block;
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -225,6 +226,8 @@ h2.section-title { font-size: 1.4rem; margin: 46px 0 18px; font-weight: 800; let
   transition: box-shadow 0.15s, transform 0.15s, border-color 0.15s;
   cursor: pointer;
   box-shadow: none;
+  color: inherit;
+  text-decoration: none;
 }
 .card:hover { box-shadow: var(--shadow); transform: translateY(-2px); border-color: #d3d8e0; }
 .photo-wrap {

@@ -76,26 +76,26 @@ const App = (() => {
     return data;
   }
 
-  // ---------- routing ----------
+  // ---------- routing (real paths via the History API — not hash routing, so
+  // Google can actually crawl and index each listing page) ----------
   function nav(path) {
-    window.location.hash = '#' + path;
+    const full = path.startsWith('/') ? path : '/' + path;
+    if (full !== window.location.pathname + window.location.search) {
+      window.history.pushState(null, '', full);
+    }
+    router();
   }
 
-  function parseHash() {
-    let hash = window.location.hash.slice(1) || '/';
-    const [pathPart, queryPart] = hash.split('?');
+  function parseLocation() {
     const query = {};
-    if (queryPart) {
-      for (const pair of queryPart.split('&')) {
-        const [k, v] = pair.split('=');
-        if (k) query[decodeURIComponent(k)] = decodeURIComponent(v || '');
-      }
+    for (const [k, v] of new URLSearchParams(window.location.search)) {
+      query[k] = v;
     }
-    return { path: pathPart || '/', query };
+    return { path: window.location.pathname || '/', query };
   }
 
   async function router() {
-    const { path, query } = parseHash();
+    const { path, query } = parseLocation();
     renderNav();
     const segs = path.split('/').filter(Boolean);
 
@@ -118,7 +118,7 @@ const App = (() => {
   function renderNav() {
     if (!state.user) {
       $nav().innerHTML = `
-        <a onclick="App.nav('/')">Browse Chairs</a>
+        <a href="/" onclick="event.preventDefault(); App.nav('/');">Browse Chairs</a>
         <button class="link" onclick="App.nav('/login')">Log in</button>
         <button class="pill-btn" onclick="App.nav('/signup')">Sign up</button>
       `;
@@ -126,9 +126,9 @@ const App = (() => {
     }
     const dashLabel = state.user.role === 'owner' ? 'My Listings' : 'My Requests';
     $nav().innerHTML = `
-      <a onclick="App.nav('/')">Browse Chairs</a>
-      ${state.user.role === 'owner' ? `<a onclick="App.nav('/post-listing')">+ Post a Listing</a>` : ''}
-      <a onclick="App.nav('/dashboard')">${dashLabel}</a>
+      <a href="/" onclick="event.preventDefault(); App.nav('/');">Browse Chairs</a>
+      ${state.user.role === 'owner' ? `<a href="/post-listing" onclick="event.preventDefault(); App.nav('/post-listing');">+ Post a Listing</a>` : ''}
+      <a href="/dashboard" onclick="event.preventDefault(); App.nav('/dashboard');">${dashLabel}</a>
       <span style="color:#cfc7ba;font-size:0.85rem;">Hi, ${escapeHtml(state.user.name.split(' ')[0])}</span>
       <button class="pill-btn ghost small" onclick="App.logout()">Log out</button>
     `;
@@ -216,7 +216,7 @@ const App = (() => {
   function listingCard(l) {
     const avail = availabilityLabel(l.available_from);
     return `
-      <div class="card" onclick="App.nav('/listing/${l.id}')">
+      <a class="card" href="/listing/${l.id}" onclick="event.preventDefault(); App.nav('/listing/${l.id}');">
         ${photoBlock(l, { alt: l.title })}
         <div class="card-body">
           <div class="card-tags">
@@ -227,7 +227,7 @@ const App = (() => {
           <div class="card-meta">${escapeHtml(l.city)}, ${escapeHtml(l.state)}${l.total_chairs ? ' &middot; ' + l.total_chairs + '-chair shop' : ''} &middot; hosted by ${escapeHtml(l.owner_name)}</div>
           <div class="price-tag">${money(l.price)}${unitLabel(l.price_unit)}</div>
         </div>
-      </div>
+      </a>
     `;
   }
 
@@ -277,7 +277,7 @@ const App = (() => {
       mediaHtml = `
         <div class="hero-placeholder">
           <span>💈</span>
-          <img src="${photoUrl(l.photo_seed, 900, 500)}" alt="${escapeHtml(l.title)}" loading="lazy" onerror="this.remove()" />
+          <img src="${photoUrl(l.photo_seed, 900, 500)}" alt="${escapeHtml(l.title)}" onerror="this.remove()" />
         </div>
       `;
     }
@@ -471,7 +471,7 @@ const App = (() => {
           <button class="pill-btn" type="submit">Log in</button>
           <div id="auth-msg"></div>
         </form>
-        <p class="card-meta" style="margin-top:14px;">No account? <a href="#/signup" style="color:var(--blue-dark); font-weight:700;">Sign up</a></p>
+        <p class="card-meta" style="margin-top:14px;">No account? <a href="/signup" onclick="event.preventDefault(); App.nav('/signup');" style="color:var(--blue-dark); font-weight:700;">Sign up</a></p>
         <p class="card-meta" style="margin-top:18px;">Try it: <b>marcus@fadedistrict.com</b> (owner) or <b>jordan@example.com</b> (barber), password <b>password123</b></p>
       </div>
     `;
@@ -510,7 +510,7 @@ const App = (() => {
           <button class="pill-btn" type="submit">Create account</button>
           <div id="auth-msg"></div>
         </form>
-        <p class="card-meta" style="margin-top:14px;">Already have an account? <a href="#/login" style="color:var(--blue-dark); font-weight:700;">Log in</a></p>
+        <p class="card-meta" style="margin-top:14px;">Already have an account? <a href="/login" onclick="event.preventDefault(); App.nav('/login');" style="color:var(--blue-dark); font-weight:700;">Log in</a></p>
       </div>
     `;
   }
@@ -556,7 +556,7 @@ const App = (() => {
 
   async function renderPostListing(editId) {
     if (!state.user || state.user.role !== 'owner') {
-      $app().innerHTML = `<p class="msg">Only space-owner accounts can post listings. <a href="#/signup" style="color:var(--blue-dark);font-weight:700;">Sign up as an owner</a> or <a href="#/login" style="color:var(--blue-dark);font-weight:700;">log in</a>.</p>`;
+      $app().innerHTML = `<p class="msg">Only space-owner accounts can post listings. <a href="/signup" onclick="event.preventDefault(); App.nav('/signup');" style="color:var(--blue-dark);font-weight:700;">Sign up as an owner</a> or <a href="/login" onclick="event.preventDefault(); App.nav('/login');" style="color:var(--blue-dark);font-weight:700;">log in</a>.</p>`;
       return;
     }
     let existing = null;
@@ -717,7 +717,42 @@ const App = (() => {
     evt.target.value = '';
   }
 
-  function addPhotoFiles(fileList) {
+  // Resizes/re-encodes a photo client-side before it ever gets uploaded — phone
+  // camera photos are routinely 3-4k px and several MB, which is overkill for a
+  // web listing and slow to upload on mobile data. Skips GIFs (compressing would
+  // kill any animation) and falls back to the original file if anything goes wrong.
+  function compressImage(file, maxDim = 1600, quality = 0.82) {
+    return new Promise((resolve) => {
+      if (!file.type.startsWith('image/') || file.type === 'image/gif') {
+        resolve(file);
+        return;
+      }
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width >= height) { height = Math.round(height * (maxDim / width)); width = maxDim; }
+          else { width = Math.round(width * (maxDim / height)); height = maxDim; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        canvas.toBlob((blob) => {
+          URL.revokeObjectURL(url);
+          if (!blob) { resolve(file); return; }
+          const compressed = new File([blob], file.name.replace(/\.\w+$/, '') + '.jpg', { type: 'image/jpeg' });
+          resolve(compressed.size < file.size ? compressed : file);
+        }, 'image/jpeg', quality);
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+      img.src = url;
+    });
+  }
+
+  async function addPhotoFiles(fileList) {
     const msgEl = document.getElementById('photo-msg');
     if (msgEl) msgEl.innerHTML = '';
     const totalExisting = postListingState.existingPhotos.length + postListingState.files.length;
@@ -731,7 +766,8 @@ const App = (() => {
         if (added >= room) { errors.push(`Only ${room} more photo(s) can be added (5 max).`); break; }
         if (!file.type.startsWith('image/')) { errors.push(`${file.name} isn't a supported image file.`); continue; }
         if (file.size > 5 * 1024 * 1024) { errors.push(`${file.name} is larger than 5MB.`); continue; }
-        postListingState.files.push({ file, previewUrl: URL.createObjectURL(file) });
+        const processed = await compressImage(file);
+        postListingState.files.push({ file: processed, previewUrl: URL.createObjectURL(processed) });
         added++;
       }
     }
@@ -802,7 +838,7 @@ const App = (() => {
   // ---------- dashboard ----------
   async function renderDashboard() {
     if (!state.user) {
-      $app().innerHTML = `<p class="msg">Log in to see your dashboard. <a href="#/login" style="color:var(--blue-dark);font-weight:700;">Log in</a></p>`;
+      $app().innerHTML = `<p class="msg">Log in to see your dashboard. <a href="/login" onclick="event.preventDefault(); App.nav('/login');" style="color:var(--blue-dark);font-weight:700;">Log in</a></p>`;
       return;
     }
     if (state.user.role === 'owner') return renderOwnerDashboard();
@@ -925,7 +961,7 @@ const App = (() => {
     try {
       await api('/api/requests/' + id, { method: 'PATCH', body: { status } });
       // refresh in place rather than re-running the router (which would reset dashboard tabs)
-      const { path } = parseHash();
+      const { path } = parseLocation();
       if (path === '/dashboard' && state.user.role === 'owner') {
         showOwnerTab(lastOwnerTab);
       } else if (path.startsWith('/requests/')) {
@@ -991,7 +1027,7 @@ const App = (() => {
   }
 
   function renderNotFound() {
-    $app().innerHTML = `<div class="empty-state">Page not found. <a href="#/" style="color:var(--blue-dark);font-weight:700;">Go home</a></div>`;
+    $app().innerHTML = `<div class="empty-state">Page not found. <a href="/" onclick="event.preventDefault(); App.nav('/');" style="color:var(--blue-dark);font-weight:700;">Go home</a></div>`;
   }
 
   // ---------- boot ----------
@@ -1006,7 +1042,7 @@ const App = (() => {
       }
     }
     state.booting = false;
-    window.addEventListener('hashchange', router);
+    window.addEventListener('popstate', router);
     router();
   }
 
