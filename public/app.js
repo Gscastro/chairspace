@@ -94,7 +94,23 @@ const App = (() => {
     return { path: window.location.pathname || '/', query };
   }
 
+  // ---------- mobile nav menu ----------
+  function toggleMenu() {
+    const navEl = $nav();
+    const btn = document.getElementById('menu-toggle');
+    const open = navEl ? navEl.classList.toggle('open') : false;
+    if (btn) { btn.classList.toggle('open', open); btn.setAttribute('aria-expanded', String(open)); }
+  }
+
+  function closeMenu() {
+    const navEl = $nav();
+    const btn = document.getElementById('menu-toggle');
+    if (navEl) navEl.classList.remove('open');
+    if (btn) { btn.classList.remove('open'); btn.setAttribute('aria-expanded', 'false'); }
+  }
+
   async function router() {
+    closeMenu();
     const { path, query } = parseLocation();
     renderNav();
     const segs = path.split('/').filter(Boolean);
@@ -129,7 +145,7 @@ const App = (() => {
       <a href="/" onclick="event.preventDefault(); App.nav('/');">Browse Chairs</a>
       ${state.user.role === 'owner' ? `<a href="/post-listing" onclick="event.preventDefault(); App.nav('/post-listing');">+ Post a Listing</a>` : ''}
       <a href="/dashboard" onclick="event.preventDefault(); App.nav('/dashboard');">${dashLabel}</a>
-      <span style="color:#cfc7ba;font-size:0.85rem;">Hi, ${escapeHtml(state.user.name.split(' ')[0])}</span>
+      <span class="nav-greeting">Hi, ${escapeHtml(state.user.name.split(' ')[0])}</span>
       <button class="pill-btn ghost small" onclick="App.logout()">Log out</button>
     `;
   }
@@ -1053,5 +1069,6 @@ const App = (() => {
     sendRequest, toggleActive, saveListing, showOwnerTab, updateRequest,
     sendMessage, stepNext, stepBack, handlePhotoSelect, removeNewPhoto,
     heroNext, heroPrev, heroGoTo, openContactModal, closeContactModal, submitInquiry,
+    toggleMenu,
   };
 })();

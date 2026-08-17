@@ -73,8 +73,70 @@ nav.main a, nav.main button.link {
   font-family: inherit;
   padding: 6px 2px;
   transition: color 0.15s;
+  white-space: nowrap;
 }
 nav.main a:hover, nav.main button.link:hover { color: var(--blue); }
+.nav-greeting { color: #8b93a3; font-size: 0.85rem; white-space: nowrap; }
+
+/* hamburger toggle — hidden on desktop, shown below the nav breakpoint */
+.menu-toggle {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 5px;
+  width: 44px;
+  height: 44px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+.menu-toggle span {
+  display: block;
+  width: 22px;
+  height: 2px;
+  background: var(--ink);
+  border-radius: 2px;
+  transition: transform 0.2s, opacity 0.2s;
+}
+.menu-toggle.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+.menu-toggle.open span:nth-child(2) { opacity: 0; }
+.menu-toggle.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
+@media (max-width: 760px) {
+  .menu-toggle { display: flex; }
+  nav.main {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
+    box-shadow: var(--shadow);
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.25s ease;
+  }
+  nav.main.open { max-height: 70vh; overflow-y: auto; }
+  nav.main a, nav.main button.link, nav.main .pill-btn, nav.main .nav-greeting {
+    width: 100%;
+    text-align: left;
+    padding: 15px 24px;
+    margin: 0;
+    border-radius: 0;
+    font-size: 1rem;
+    box-shadow: none;
+    white-space: normal;
+    border-bottom: 1px solid var(--line);
+  }
+  nav.main a:last-child, nav.main button.link:last-child,
+  nav.main .pill-btn:last-child, nav.main .nav-greeting:last-child { border-bottom: none; }
+}
 .pill-btn {
   background: var(--blue);
   color: #fff;
