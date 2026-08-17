@@ -67,6 +67,21 @@ database for a real launch.
 - Simple in-app messaging thread per request, once a barber has reached out
 - Sample data: 4 shop owners with 8 listings across Austin, Dallas, Houston, and Chicago,
   plus 2 sample barber accounts
+- **Favorites** — barbers can tap the heart on any listing card (or its detail page) to
+  bookmark it, and see all their saved listings under a "Favorites" tab on their dashboard
+- **Saved search alerts** — barbers can save a search (city/type/billing period/max price)
+  from the homepage and get emailed automatically the moment a new matching listing goes up,
+  no polling/cron needed — it checks on listing creation
+- **Barber license field** at signup (license number, state, expiration) — optional for now,
+  not verified, but it's collected as a first step toward a trust badge later
+- **Two-way blind reviews** — once a rental request is approved, either side can leave a
+  star rating + comment. Neither party sees the other's review until both have submitted
+  theirs, so no one holds back an honest review out of fear of retaliation. Listing pages
+  show the average rating and review list once reviews exist.
+- **A map on every listing page** — addresses are geocoded automatically (free, via
+  OpenStreetMap's Nominatim service, no API key) and shown as an embedded OpenStreetMap
+- **Cancellation policy selector** (Flexible / Standard / Strict) when posting a listing,
+  shown to barbers on the listing page before they request it
 
 ## Email notifications setup
 
@@ -89,6 +104,14 @@ To turn emails on:
    is verified — check Resend's own docs for current sandbox-mode limits.
 5. Redeploy (or just wait for the next natural redeploy) — no code changes needed, the app
    picks up the environment variable automatically.
+
+## Map setup
+
+Nothing to configure — listing addresses are geocoded automatically via
+[OpenStreetMap's Nominatim](https://nominatim.org/) (free, no API key, no account) the moment
+a listing is created or its address is edited, and the map on the listing page is a free
+embedded OpenStreetMap. If a lookup ever fails (e.g. an address that can't be found), the
+listing just doesn't show a map — it never blocks posting or editing.
 
 ## How to run it
 
@@ -141,11 +164,15 @@ people, and gathering feedback. Before this could be a real product, it would st
 - **Payments** — collecting rent/deposits, e.g. via Stripe Connect so money can flow between
   barbers and space owners
 - **Stronger auth** — email verification, password reset, rate limiting on login attempts
-- **Maps/geolocation search** instead of city/ZIP text matching
+- **True geolocation search** ("near me", distance sorting) — listings now show a map, but
+  search/filtering is still city/ZIP text matching, not radius-based
 - **SMS notifications** — email notifications now exist (see "Email notifications setup"
   above); text-message alerts would be a further addition
-- **Reviews/ratings** for both barbers and spaces
-- **Legal basics** — rental agreement terms, cancellation policy, liability language
+- **Verified reviews tied to a completed rental** — reviews exist now (see above), but since
+  there's no explicit "rental completed" step yet, an approved request is used as the proxy
+  for "the rental happened"
+- **Legal basics** — a real rental agreement template and liability language (a cancellation
+  policy selector exists now, but it's just a label, not enforceable terms)
 - **A real production database** (e.g. Postgres) and hosting (e.g. Render, Railway, Fly.io) for
   a live deployment, plus a domain name
 

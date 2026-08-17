@@ -85,7 +85,64 @@ db.exec(`
     created_at TEXT NOT NULL,
     FOREIGN KEY(listing_id) REFERENCES listings(id)
   );
+
+  CREATE TABLE IF NOT EXISTS favorites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    listing_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(user_id, listing_id),
+    FOREIGN KEY(user_id) REFERENCES users(id),
+    FOREIGN KEY(listing_id) REFERENCES listings(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id INTEGER NOT NULL,
+    listing_id INTEGER NOT NULL,
+    author_id INTEGER NOT NULL,
+    target_type TEXT NOT NULL CHECK(target_type IN ('listing','barber')),
+    target_id INTEGER NOT NULL,
+    rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
+    comment TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(request_id, author_id),
+    FOREIGN KEY(request_id) REFERENCES requests(id),
+    FOREIGN KEY(listing_id) REFERENCES listings(id),
+    FOREIGN KEY(author_id) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS saved_searches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    label TEXT,
+    city TEXT,
+    chair_type TEXT,
+    price_unit TEXT,
+    max_price REAL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
 `);
+
+// ---------- lightweight migrations ----------
+// node:sqlite's CREATE TABLE IF NOT EXISTS won't add new columns to a table
+// that already exists on disk (e.g. a local dev db from before this change),
+// so new columns are added defensively via ALTER TABLE, guarded by checking
+// PRAGMA table_info first so re-running this on a fresh db is a harmless no-op.
+function ensureColumn(table, column, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+
+ensureColumn('users', 'license_number', 'license_number TEXT');
+ensureColumn('users', 'license_state', 'license_state TEXT');
+ensureColumn('users', 'license_expiration', 'license_expiration TEXT');
+ensureColumn('listings', 'lat', 'lat REAL');
+ensureColumn('listings', 'lon', 'lon REAL');
+ensureColumn('listings', 'cancellation_policy', "cancellation_policy TEXT DEFAULT 'standard'");
 
 function hashPassword(password, salt) {
   return crypto.scryptSync(password, salt, 64).toString('hex');

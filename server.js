@@ -60,6 +60,69 @@ function sendEmail({ to, subject, html }) {
   });
 }
 
+// ---------- geocoding (OpenStreetMap Nominatim — free, no API key) ----------
+// Fire-and-forget, same pattern as sendEmail: never throws, never blocks the
+// response. Nominatim's usage policy requires a real User-Agent and asks for
+// max ~1 request/sec, which is fine for a prototype's occasional listing
+// creates/edits (this isn't called on every page view, only when a listing's
+// address changes).
+function geocodeListing(listingId, address, city, state, zip) {
+  const query = [address, city, state, zip].filter(Boolean).join(', ');
+  if (!query) return;
+  const path = `/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
+  const req = https.request(
+    {
+      hostname: 'nominatim.openstreetmap.org',
+      path,
+      method: 'GET',
+      headers: { 'User-Agent': 'ChairSpace-Prototype/1.0 (contact: chairspace app)' },
+    },
+    (res) => {
+      let body = '';
+      res.on('data', (c) => (body += c));
+      res.on('end', () => {
+        try {
+          const results = JSON.parse(body);
+          if (Array.isArray(results) && results[0]) {
+            const lat = Number(results[0].lat);
+            const lon = Number(results[0].lon);
+            if (Number.isFinite(lat) && Number.isFinite(lon)) {
+              db.prepare('UPDATE listings SET lat = ?, lon = ? WHERE id = ?').run(lat, lon, listingId);
+            }
+          }
+        } catch (e) {
+          console.error('[geocode parse error]', e.message);
+        }
+      });
+    }
+  );
+  req.on('error', (e) => console.error('[geocode error]', e.message));
+  req.end();
+}
+
+// ---------- saved search alerts ----------
+// Event-driven rather than polled: Render's free tier spins the server down
+// on inactivity, so a cron-style poller wouldn't reliably run anyway. Instead
+// we check saved searches once, right when a new listing is created.
+function notifySavedSearchMatches(listing) {
+  const searches = db.prepare('SELECT * FROM saved_searches').all();
+  for (const s of searches) {
+    if (s.city && !listing.city.toLowerCase().includes(String(s.city).toLowerCase())) continue;
+    if (s.chair_type && s.chair_type !== listing.chair_type) continue;
+    if (s.price_unit && s.price_unit !== listing.price_unit) continue;
+    if (s.max_price && Number(listing.price) > Number(s.max_price)) continue;
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(s.user_id);
+    if (!user) continue;
+    sendEmail({
+      to: user.email,
+      subject: `New chair matches your saved search — ChairSpace`,
+      html: `<p>A new listing matches your saved search${s.label ? ` "${escapeHtml(s.label)}"` : ''}:</p>
+        <p><b>${escapeHtml(listing.title)}</b> — ${escapeHtml(listing.city)}, ${escapeHtml(listing.state)} — $${listing.price}/${listing.price_unit}</p>
+        <p><a href="${PUBLIC_URL}/listing/${listing.id}">View it on ChairSpace</a></p>`,
+    });
+  }
+}
+
 // ---------- helpers ----------
 
 function send(res, status, data, headers = {}) {
@@ -169,7 +232,7 @@ function getSessionUser(req) {
   if (!token) return null;
   const row = db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
   if (!row) return null;
-  const user = db.prepare('SELECT id, name, email, role, phone, bio, created_at FROM users WHERE id = ?').get(row.user_id);
+  const user = db.prepare('SELECT id, name, email, role, phone, bio, license_number, license_state, license_expiration, created_at FROM users WHERE id = ?').get(row.user_id);
   return user || null;
 }
 
@@ -190,10 +253,15 @@ function publicListing(row) {
     photos: row.photos ? JSON.parse(row.photos) : [],
     available_from: row.available_from,
     total_chairs: row.total_chairs,
+    cancellation_policy: row.cancellation_policy || 'standard',
+    lat: row.lat === undefined ? null : row.lat,
+    lon: row.lon === undefined ? null : row.lon,
     active: !!row.active,
     created_at: row.created_at,
   };
 }
+
+const CANCELLATION_POLICIES = ['flexible', 'standard', 'strict'];
 
 // ---------- route handlers ----------
 
@@ -212,7 +280,7 @@ function route(method, pattern, handler) {
 
 route('POST', '/api/signup', async (req, res) => {
   const body = await readBody(req);
-  const { name, email, password, role, phone, bio } = body;
+  const { name, email, password, role, phone, bio, license_number, license_state, license_expiration } = body;
   if (!name || !email || !password || !role) {
     return send(res, 400, { error: 'name, email, password, and role are required' });
   }
@@ -224,16 +292,21 @@ route('POST', '/api/signup', async (req, res) => {
 
   const salt = crypto.randomBytes(16).toString('hex');
   const password_hash = hashPassword(password, salt);
+  // License fields only meaningfully apply to barbers, but we don't reject
+  // an owner for sending them — just store null for non-barbers.
+  const lic = role === 'barber' ? (license_number || null) : null;
+  const licState = role === 'barber' ? (license_state || null) : null;
+  const licExp = role === 'barber' ? (license_expiration || null) : null;
   const info = db.prepare(`
-    INSERT INTO users (name, email, password_hash, salt, role, phone, bio, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(name, email.toLowerCase().trim(), password_hash, salt, role, phone || null, bio || null, new Date().toISOString());
+    INSERT INTO users (name, email, password_hash, salt, role, phone, bio, license_number, license_state, license_expiration, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(name, email.toLowerCase().trim(), password_hash, salt, role, phone || null, bio || null, lic, licState, licExp, new Date().toISOString());
 
   const userId = Number(info.lastInsertRowid);
   const token = crypto.randomBytes(24).toString('hex');
   db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)').run(token, userId, new Date().toISOString());
 
-  const user = db.prepare('SELECT id, name, email, role, phone, bio, created_at FROM users WHERE id = ?').get(userId);
+  const user = db.prepare('SELECT id, name, email, role, phone, bio, license_number, license_state, license_expiration, created_at FROM users WHERE id = ?').get(userId);
   send(res, 201, { token, user });
 });
 
@@ -251,7 +324,11 @@ route('POST', '/api/login', async (req, res) => {
   const token = crypto.randomBytes(24).toString('hex');
   db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)').run(token, row.id, new Date().toISOString());
 
-  const user = { id: row.id, name: row.name, email: row.email, role: row.role, phone: row.phone, bio: row.bio, created_at: row.created_at };
+  const user = {
+    id: row.id, name: row.name, email: row.email, role: row.role, phone: row.phone, bio: row.bio,
+    license_number: row.license_number, license_state: row.license_state, license_expiration: row.license_expiration,
+    created_at: row.created_at,
+  };
   send(res, 200, { token, user });
 });
 
@@ -320,21 +397,26 @@ route('POST', '/api/listings', async (req, res) => {
   if (user.role !== 'owner') return send(res, 403, { error: 'Only space owners can post listings' });
 
   const body = await readBody(req);
-  const { title, description, address, city, state, zip, price, price_unit, chair_type, available_from, total_chairs } = body;
+  const { title, description, address, city, state, zip, price, price_unit, chair_type, available_from, total_chairs, cancellation_policy } = body;
   if (!title || !city || !state || !price || !price_unit || !chair_type) {
     return send(res, 400, { error: 'title, city, state, price, price_unit, and chair_type are required' });
   }
   if (!['hour', 'day', 'week', 'month'].includes(price_unit)) {
     return send(res, 400, { error: 'price_unit must be one of hour, day, week, month' });
   }
+  const policy = CANCELLATION_POLICIES.includes(cancellation_policy) ? cancellation_policy : 'standard';
   const photo_seed = 'l' + Date.now() + Math.floor(Math.random() * 1000);
   const info = db.prepare(`
-    INSERT INTO listings (owner_id, title, description, address, city, state, zip, price, price_unit, chair_type, photo_seed, available_from, total_chairs, active, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-  `).run(user.id, title, description || '', address || '', city, state, zip || '', Number(price), price_unit, chair_type, photo_seed, available_from || null, total_chairs ? Number(total_chairs) : null, new Date().toISOString());
+    INSERT INTO listings (owner_id, title, description, address, city, state, zip, price, price_unit, chair_type, photo_seed, available_from, total_chairs, cancellation_policy, active, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+  `).run(user.id, title, description || '', address || '', city, state, zip || '', Number(price), price_unit, chair_type, photo_seed, available_from || null, total_chairs ? Number(total_chairs) : null, policy, new Date().toISOString());
 
-  const listing = publicListing(db.prepare('SELECT * FROM listings WHERE id = ?').get(Number(info.lastInsertRowid)));
+  const listingId = Number(info.lastInsertRowid);
+  const listing = publicListing(db.prepare('SELECT * FROM listings WHERE id = ?').get(listingId));
   send(res, 201, { listing });
+
+  geocodeListing(listingId, address, city, state, zip);
+  notifySavedSearchMatches(listing);
 });
 
 route('PATCH', '/api/listings/:id', async (req, res, params) => {
@@ -347,12 +429,13 @@ route('PATCH', '/api/listings/:id', async (req, res, params) => {
   const body = await readBody(req);
   const fields = [];
   const args = [];
-  for (const key of ['title', 'description', 'address', 'city', 'state', 'zip', 'price', 'price_unit', 'chair_type', 'available_from', 'total_chairs', 'active']) {
+  for (const key of ['title', 'description', 'address', 'city', 'state', 'zip', 'price', 'price_unit', 'chair_type', 'available_from', 'total_chairs', 'cancellation_policy', 'active']) {
     if (body[key] !== undefined) {
       fields.push(`${key} = ?`);
       let val = body[key];
       if (key === 'active') val = body.active ? 1 : 0;
       else if (key === 'total_chairs') val = body.total_chairs === '' || body.total_chairs === null ? null : Number(body.total_chairs);
+      else if (key === 'cancellation_policy') val = CANCELLATION_POLICIES.includes(val) ? val : 'standard';
       args.push(val);
     }
   }
@@ -361,6 +444,9 @@ route('PATCH', '/api/listings/:id', async (req, res, params) => {
   db.prepare(`UPDATE listings SET ${fields.join(', ')} WHERE id = ?`).run(...args);
   const updated = publicListing(db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id));
   send(res, 200, { listing: updated });
+
+  const addressChanged = ['address', 'city', 'state', 'zip'].some((k) => body[k] !== undefined);
+  if (addressChanged) geocodeListing(params.id, updated.address, updated.city, updated.state, updated.zip);
 });
 
 route('POST', '/api/listings/:id/photos', async (req, res, params) => {
@@ -427,6 +513,51 @@ route('GET', '/api/my-listings', async (req, res) => {
   if (user.role !== 'owner') return send(res, 403, { error: 'Only space owners have listings' });
   const rows = db.prepare('SELECT * FROM listings WHERE owner_id = ? ORDER BY created_at DESC').all(user.id);
   send(res, 200, { listings: rows.map(publicListing) });
+});
+
+// --- Favorites (barbers bookmarking listings) ---
+
+route('GET', '/api/favorites', async (req, res) => {
+  const user = getSessionUser(req);
+  if (!user) return send(res, 401, { error: 'Not logged in' });
+  const rows = db.prepare(`
+    SELECT l.* FROM favorites f
+    JOIN listings l ON f.listing_id = l.id
+    WHERE f.user_id = ?
+    ORDER BY f.created_at DESC
+  `).all(user.id);
+  send(res, 200, { listings: rows.map(publicListing) });
+});
+
+route('GET', '/api/favorites/ids', async (req, res) => {
+  const user = getSessionUser(req);
+  if (!user) return send(res, 401, { error: 'Not logged in' });
+  const rows = db.prepare('SELECT listing_id FROM favorites WHERE user_id = ?').all(user.id);
+  send(res, 200, { listing_ids: rows.map((r) => r.listing_id) });
+});
+
+route('POST', '/api/favorites', async (req, res) => {
+  const user = getSessionUser(req);
+  if (!user) return send(res, 401, { error: 'Not logged in' });
+  const body = await readBody(req);
+  const listingId = Number(body.listing_id);
+  if (!listingId) return send(res, 400, { error: 'listing_id is required' });
+  const listing = db.prepare('SELECT id FROM listings WHERE id = ?').get(listingId);
+  if (!listing) return send(res, 404, { error: 'Listing not found' });
+  try {
+    db.prepare('INSERT INTO favorites (user_id, listing_id, created_at) VALUES (?, ?, ?)')
+      .run(user.id, listingId, new Date().toISOString());
+  } catch (e) {
+    // UNIQUE constraint — already favorited, treat as a no-op success
+  }
+  send(res, 201, { ok: true });
+});
+
+route('DELETE', '/api/favorites/:listingId', async (req, res, params) => {
+  const user = getSessionUser(req);
+  if (!user) return send(res, 401, { error: 'Not logged in' });
+  db.prepare('DELETE FROM favorites WHERE user_id = ? AND listing_id = ?').run(user.id, params.listingId);
+  send(res, 200, { ok: true });
 });
 
 // --- Inquiries (no-login "Contact Owner" leads) ---
@@ -656,6 +787,120 @@ route('POST', '/api/requests/:id/messages', async (req, res, params) => {
       });
     }
   }
+});
+
+// --- Saved searches (email alert when a new matching listing goes up) ---
+
+route('GET', '/api/saved-searches', async (req, res) => {
+  const user = getSessionUser(req);
+  if (!user) return send(res, 401, { error: 'Not logged in' });
+  const rows = db.prepare('SELECT * FROM saved_searches WHERE user_id = ? ORDER BY created_at DESC').all(user.id);
+  send(res, 200, { searches: rows });
+});
+
+route('POST', '/api/saved-searches', async (req, res) => {
+  const user = getSessionUser(req);
+  if (!user) return send(res, 401, { error: 'Not logged in' });
+  if (user.role !== 'barber') return send(res, 403, { error: 'Only barbers can save searches' });
+  const body = await readBody(req);
+  const { label, city, chair_type, price_unit, max_price } = body;
+  if (!city && !chair_type && !price_unit && !max_price) {
+    return send(res, 400, { error: 'Add at least one filter to save a search' });
+  }
+  const info = db.prepare(`
+    INSERT INTO saved_searches (user_id, label, city, chair_type, price_unit, max_price, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(user.id, label || null, city || null, chair_type || null, price_unit || null, max_price ? Number(max_price) : null, new Date().toISOString());
+  const created = db.prepare('SELECT * FROM saved_searches WHERE id = ?').get(Number(info.lastInsertRowid));
+  send(res, 201, { search: created });
+});
+
+route('DELETE', '/api/saved-searches/:id', async (req, res, params) => {
+  const user = getSessionUser(req);
+  if (!user) return send(res, 401, { error: 'Not logged in' });
+  const row = db.prepare('SELECT * FROM saved_searches WHERE id = ?').get(params.id);
+  if (!row) return send(res, 404, { error: 'Saved search not found' });
+  if (row.user_id !== user.id) return send(res, 403, { error: 'Not your saved search' });
+  db.prepare('DELETE FROM saved_searches WHERE id = ?').run(params.id);
+  send(res, 200, { ok: true });
+});
+
+// --- Reviews (two-way, blind until both sides submit) ---
+// Modeled on Peerspace-style reviews: neither party can see the other's
+// review until both have submitted theirs, so no one holds back an honest
+// review out of fear of retaliation. Since this prototype has no explicit
+// "rental completed" step yet, an approved request is used as the proxy for
+// "the rental happened" — either party can review once status = approved.
+
+function reviewsVisibleCount(requestId) {
+  const { count } = db.prepare('SELECT COUNT(*) as count FROM reviews WHERE request_id = ?').get(requestId);
+  return count;
+}
+
+route('POST', '/api/requests/:id/reviews', async (req, res, params) => {
+  const user = getSessionUser(req);
+  if (!user) return send(res, 401, { error: 'Not logged in' });
+  const row = db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
+  if (!row) return send(res, 404, { error: 'Request not found' });
+  const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
+  const isOwner = listing && listing.owner_id === user.id;
+  const isBarber = row.barber_id === user.id;
+  if (!isOwner && !isBarber) return send(res, 403, { error: 'Not part of this rental' });
+  if (row.status !== 'approved') return send(res, 400, { error: 'You can only leave a review once the request has been approved' });
+
+  const body = await readBody(req);
+  const rating = Number(body.rating);
+  if (!rating || rating < 1 || rating > 5) return send(res, 400, { error: 'rating must be between 1 and 5' });
+
+  const existing = db.prepare('SELECT id FROM reviews WHERE request_id = ? AND author_id = ?').get(params.id, user.id);
+  if (existing) return send(res, 409, { error: "You've already reviewed this rental" });
+
+  const target_type = isBarber ? 'listing' : 'barber';
+  const target_id = isBarber ? listing.id : row.barber_id;
+
+  db.prepare(`
+    INSERT INTO reviews (request_id, listing_id, author_id, target_type, target_id, rating, comment, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(params.id, listing.id, user.id, target_type, target_id, rating, (body.comment || '').trim(), new Date().toISOString());
+
+  send(res, 201, { ok: true, bothSubmitted: reviewsVisibleCount(params.id) === 2 });
+});
+
+route('GET', '/api/requests/:id/reviews', async (req, res, params) => {
+  const user = getSessionUser(req);
+  if (!user) return send(res, 401, { error: 'Not logged in' });
+  const row = db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
+  if (!row) return send(res, 404, { error: 'Request not found' });
+  const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
+  const isParty = row.barber_id === user.id || (listing && listing.owner_id === user.id);
+  if (!isParty) return send(res, 403, { error: 'Not part of this rental' });
+
+  const rows = db.prepare('SELECT * FROM reviews WHERE request_id = ?').all(params.id);
+  const mine = rows.find((r) => r.author_id === user.id) || null;
+  const bothSubmitted = rows.length === 2;
+  const other = bothSubmitted ? rows.find((r) => r.author_id !== user.id) : null;
+  send(res, 200, {
+    canReview: row.status === 'approved' && !mine,
+    myReview: mine,
+    otherReview: other,
+    bothSubmitted,
+  });
+});
+
+route('GET', '/api/listings/:id/reviews', async (req, res, params) => {
+  const rows = db.prepare(`
+    SELECT r.* FROM reviews r
+    WHERE r.target_type = 'listing' AND r.target_id = ?
+  `).all(params.id);
+  // Only reveal reviews whose counterpart (the barber-targeted review for the
+  // same request) has also been submitted — same blind logic as above.
+  const visible = rows.filter((r) => reviewsVisibleCount(r.request_id) === 2);
+  const enriched = visible.map((r) => {
+    const author = db.prepare('SELECT id, name FROM users WHERE id = ?').get(r.author_id);
+    return { id: r.id, rating: r.rating, comment: r.comment, created_at: r.created_at, author: author ? { id: author.id, name: author.name } : null };
+  });
+  const avg = enriched.length ? enriched.reduce((s, r) => s + r.rating, 0) / enriched.length : null;
+  send(res, 200, { reviews: enriched, average: avg, count: enriched.length });
 });
 
 // ---------- static file serving ----------
