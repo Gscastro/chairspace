@@ -11,11 +11,6 @@ const App = (() => {
   const $nav = () => document.getElementById('nav');
 
   const CHAIR_TYPES = ['Booth rent', 'Chair rental', 'Private suite', 'Shared station'];
-  const AMENITY_OPTIONS = [
-    'WiFi', 'Free parking', 'Product storage', 'Washer/dryer', 'Reception/front desk',
-    'Private entrance', 'Laundry', '24/7 access', 'Security system', 'Skylight/natural light',
-    'Wheelchair accessible',
-  ];
 
   function escapeHtml(str) {
     if (str === null || str === undefined) return '';
@@ -37,15 +32,28 @@ const App = (() => {
   }
 
   // Renders a photo area that falls back to a tasteful placeholder (no broken-image
-  // icon) if the remote image host can't be reached.
-  function photoBlock(seed, opts = {}) {
+  // icon) if the remote image host can't be reached. Prefers a real uploaded photo
+  // over the placeholder-seed image when the listing has one.
+  function photoBlock(listing, opts = {}) {
     const { w = 400, h = 300, tall = false, alt = '' } = opts;
+    const real = listing && listing.photos && listing.photos.length ? listing.photos[0] : null;
+    const src = real || photoUrl(listing ? listing.photo_seed : null, w, h);
     return `
       <div class="photo-wrap${tall ? ' tall' : ''}">
         <span>💈</span>
-        <img src="${photoUrl(seed, w, h)}" alt="${escapeHtml(alt)}" loading="lazy" onerror="this.remove()" />
+        <img src="${src}" alt="${escapeHtml(alt)}" loading="lazy" onerror="this.remove()" />
       </div>
     `;
+  }
+
+  function availabilityLabel(available_from) {
+    if (!available_from) return 'Available now';
+    const d = new Date(available_from + 'T00:00:00');
+    if (isNaN(d.getTime())) return 'Available now';
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (d.getTime() <= today.getTime()) return 'Available now';
+    return 'Available ' + d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
 
   function timeAgo(iso) {
@@ -133,7 +141,7 @@ const App = (() => {
         <h1>Find your next chair.</h1>
         <p class="sub">Search open booths, chairs, and private suites at barbershops and salons near you — request a spot and hear back from the owner directly.</p>
         <form class="search-bar" onsubmit="App.searchSubmit(event)">
-          <input name="city" placeholder="City (e.g. Austin)" value="${escapeHtml(query.city || '')}" />
+          <input name="city" placeholder="City or ZIP code" value="${escapeHtml(query.city || '')}" />
           <select name="chair_type">
             <option value="">Any space type</option>
             ${CHAIR_TYPES.map(t => `<option value="${t}" ${query.chair_type === t ? 'selected' : ''}>${t}</option>`).join('')}
@@ -145,7 +153,16 @@ const App = (() => {
             <option value="week" ${query.price_unit === 'week' ? 'selected' : ''}>Weekly</option>
             <option value="month" ${query.price_unit === 'month' ? 'selected' : ''}>Monthly</option>
           </select>
-          <input name="max_price" type="number" min="0" placeholder="Max price" value="${escapeHtml(query.max_price || '')}" />
+          <div class="field-slider">
+            <label for="max_price_slider">Max weekly rent: <span id="price-slider-val">${query.max_price && query.max_price < 2000 ? money(query.max_price) : 'Any'}</span></label>
+            <input id="max_price_slider" name="max_price" type="range" min="0" max="2000" step="25"
+              value="${escapeHtml(query.max_price || '2000')}"
+              oninput="document.getElementById('price-slider-val').textContent = this.value >= 2000 ? 'Any' : ('$' + this.value)" />
+          </div>
+          <label class="check-inline">
+            <input type="checkbox" name="available_only" value="1" ${query.available_only ? 'checked' : ''} />
+            Available now only
+          </label>
           <button class="pill-btn" type="submit">Search</button>
         </form>
       </div>
@@ -178,7 +195,8 @@ const App = (() => {
     if (query.city) params.set('city', query.city);
     if (query.chair_type) params.set('chair_type', query.chair_type);
     if (query.price_unit) params.set('price_unit', query.price_unit);
-    if (query.max_price) params.set('max_price', query.max_price);
+    if (query.max_price && Number(query.max_price) < 2000) params.set('max_price', query.max_price);
+    if (query.available_only) params.set('available_only', '1');
 
     try {
       const { listings } = await api('/api/listings?' + params.toString());
@@ -196,13 +214,17 @@ const App = (() => {
   }
 
   function listingCard(l) {
+    const avail = availabilityLabel(l.available_from);
     return `
       <div class="card" onclick="App.nav('/listing/${l.id}')">
-        ${photoBlock(l.photo_seed, { alt: l.title })}
+        ${photoBlock(l, { alt: l.title })}
         <div class="card-body">
-          <span class="badge">${escapeHtml(l.chair_type)}</span>
+          <div class="card-tags">
+            <span class="badge">${escapeHtml(l.chair_type)}</span>
+            <span class="avail-tag ${avail === 'Available now' ? 'now' : ''}">${escapeHtml(avail)}</span>
+          </div>
           <h3>${escapeHtml(l.title)}</h3>
-          <div class="card-meta">${escapeHtml(l.city)}, ${escapeHtml(l.state)} &middot; hosted by ${escapeHtml(l.owner_name)}</div>
+          <div class="card-meta">${escapeHtml(l.city)}, ${escapeHtml(l.state)}${l.total_chairs ? ' &middot; ' + l.total_chairs + '-chair shop' : ''} &middot; hosted by ${escapeHtml(l.owner_name)}</div>
           <div class="price-tag">${money(l.price)}${unitLabel(l.price_unit)}</div>
         </div>
       </div>
@@ -213,7 +235,11 @@ const App = (() => {
     evt.preventDefault();
     const f = new FormData(evt.target);
     const q = new URLSearchParams();
-    for (const [k, v] of f.entries()) if (v) q.set(k, v);
+    for (const [k, v] of f.entries()) {
+      if (!v) continue;
+      if (k === 'max_price' && Number(v) >= 2000) continue; // slider maxed out = no cap
+      q.set(k, v);
+    }
     nav('/?' + q.toString());
   }
 
@@ -234,16 +260,20 @@ const App = (() => {
     $app().innerHTML = `
       <div class="detail-grid">
         <div>
-          <div class="detail-photo">${photoBlock(l.photo_seed, { w: 900, h: 500, tall: true, alt: l.title })}</div>
-          <span class="badge">${escapeHtml(l.chair_type)}</span>
-          ${!l.active ? '<span class="badge status-declined">Inactive</span>' : ''}
-          <h1 style="margin:8px 0 2px;">${escapeHtml(l.title)}</h1>
-          <div class="card-meta">${escapeHtml(l.address ? l.address + ', ' : '')}${escapeHtml(l.city)}, ${escapeHtml(l.state)} ${escapeHtml(l.zip || '')}</div>
-          <p>${escapeHtml(l.description || 'No description provided.')}</p>
-          <h3>Amenities</h3>
-          <div class="amenity-list">
-            ${l.amenities.length ? l.amenities.map(a => `<span class="amenity-chip">${escapeHtml(a)}</span>`).join('') : '<span class="card-meta">None listed</span>'}
+          <div class="detail-photo">${photoBlock(l, { w: 900, h: 500, tall: true, alt: l.title })}</div>
+          ${l.photos && l.photos.length > 1 ? `
+            <div class="photo-thumb-row">
+              ${l.photos.map(p => `<div class="photo-thumb"><img src="${p}" alt="${escapeHtml(l.title)}" /></div>`).join('')}
+            </div>
+          ` : ''}
+          <div class="card-tags">
+            <span class="badge">${escapeHtml(l.chair_type)}</span>
+            ${!l.active ? '<span class="badge status-declined">Inactive</span>' : ''}
+            <span class="avail-tag ${availabilityLabel(l.available_from) === 'Available now' ? 'now' : ''}">${escapeHtml(availabilityLabel(l.available_from))}</span>
           </div>
+          <h1 style="margin:8px 0 2px;">${escapeHtml(l.title)}</h1>
+          <div class="card-meta">${escapeHtml(l.address ? l.address + ', ' : '')}${escapeHtml(l.city)}, ${escapeHtml(l.state)} ${escapeHtml(l.zip || '')}${l.total_chairs ? ' &middot; ' + l.total_chairs + '-chair shop' : ''}</div>
+          <p>${escapeHtml(l.description || 'No description provided.')}</p>
           <h3>Hosted by</h3>
           <p class="card-meta">${escapeHtml(l.owner.name)}${l.owner.bio ? ' — ' + escapeHtml(l.owner.bio) : ''}</p>
         </div>
@@ -327,7 +357,7 @@ const App = (() => {
           <button class="pill-btn" type="submit">Log in</button>
           <div id="auth-msg"></div>
         </form>
-        <p class="card-meta" style="margin-top:14px;">No account? <a href="#/signup" style="color:var(--amber-dark); font-weight:700;">Sign up</a></p>
+        <p class="card-meta" style="margin-top:14px;">No account? <a href="#/signup" style="color:var(--blue-dark); font-weight:700;">Sign up</a></p>
         <p class="card-meta" style="margin-top:18px;">Try it: <b>marcus@fadedistrict.com</b> (owner) or <b>jordan@example.com</b> (barber), password <b>password123</b></p>
       </div>
     `;
@@ -366,7 +396,7 @@ const App = (() => {
           <button class="pill-btn" type="submit">Create account</button>
           <div id="auth-msg"></div>
         </form>
-        <p class="card-meta" style="margin-top:14px;">Already have an account? <a href="#/login" style="color:var(--amber-dark); font-weight:700;">Log in</a></p>
+        <p class="card-meta" style="margin-top:14px;">Already have an account? <a href="#/login" style="color:var(--blue-dark); font-weight:700;">Log in</a></p>
       </div>
     `;
   }
@@ -406,10 +436,13 @@ const App = (() => {
     nav('/');
   }
 
-  // ---------- post / edit listing ----------
+  // ---------- post / edit listing (multi-step) ----------
+  const POST_STEPS = ['Basics', 'Location', 'Pricing', 'Photos'];
+  let postListingState = { step: 0, files: [], existingPhotos: [] };
+
   async function renderPostListing(editId) {
     if (!state.user || state.user.role !== 'owner') {
-      $app().innerHTML = `<p class="msg">Only space-owner accounts can post listings. <a href="#/signup" style="color:var(--amber-dark);font-weight:700;">Sign up as an owner</a> or <a href="#/login" style="color:var(--amber-dark);font-weight:700;">log in</a>.</p>`;
+      $app().innerHTML = `<p class="msg">Only space-owner accounts can post listings. <a href="#/signup" style="color:var(--blue-dark);font-weight:700;">Sign up as an owner</a> or <a href="#/login" style="color:var(--blue-dark);font-weight:700;">log in</a>.</p>`;
       return;
     }
     let existing = null;
@@ -427,58 +460,211 @@ const App = (() => {
       }
     }
     const e = existing || {};
+    postListingState = { step: 0, files: [], existingPhotos: (e.photos || []).slice() };
+
     $app().innerHTML = `
       <h1>${editId ? 'Edit listing' : 'Post a new listing'}</h1>
-      <form class="stack" onsubmit="App.saveListing(event, ${editId ? editId : 'null'})">
-        <div class="field"><label>Title</label><input type="text" name="title" required value="${escapeHtml(e.title || '')}" placeholder="e.g. Open booth in busy East Austin shop" /></div>
-        <div class="field"><label>Description</label><textarea name="description" placeholder="Describe the space, the shop, expectations...">${escapeHtml(e.description || '')}</textarea></div>
-        <div class="row-2">
-          <div class="field"><label>City</label><input type="text" name="city" required value="${escapeHtml(e.city || '')}" /></div>
-          <div class="field"><label>State</label><input type="text" name="state" required value="${escapeHtml(e.state || '')}" maxlength="2" placeholder="TX" /></div>
-        </div>
-        <div class="row-2">
-          <div class="field"><label>Street address (optional)</label><input type="text" name="address" value="${escapeHtml(e.address || '')}" /></div>
-          <div class="field"><label>ZIP (optional)</label><input type="text" name="zip" value="${escapeHtml(e.zip || '')}" /></div>
-        </div>
-        <div class="row-2">
-          <div class="field"><label>Price</label><input type="number" name="price" min="0" step="1" required value="${e.price || ''}" /></div>
-          <div class="field"><label>Billing period</label>
-            <select name="price_unit" required>
+      <div class="step-progress">
+        ${POST_STEPS.map((s, i) => `
+          <div class="step-dot${i === 0 ? ' active' : ''}" data-step="${i}">
+            <span class="dot-num">${i + 1}</span><span class="dot-label">${s}</span>
+          </div>
+        `).join('')}
+      </div>
+      <form class="stack listing-form" onsubmit="App.saveListing(event, ${editId ? editId : 'null'})">
+        <div class="step-panel" data-panel="0">
+          <div class="field"><label>Title</label><input type="text" name="title" required value="${escapeHtml(e.title || '')}" placeholder="e.g. Open booth in busy East Austin shop" /></div>
+          <div class="field"><label>Description</label><textarea name="description" placeholder="Describe the space, the shop, expectations...">${escapeHtml(e.description || '')}</textarea></div>
+          <div class="field"><label>Space type</label>
+            <select name="chair_type" required>
               <option value="">Choose one</option>
-              <option value="hour" ${e.price_unit === 'hour' ? 'selected' : ''}>Per hour</option>
-              <option value="day" ${e.price_unit === 'day' ? 'selected' : ''}>Per day</option>
-              <option value="week" ${e.price_unit === 'week' ? 'selected' : ''}>Per week</option>
-              <option value="month" ${e.price_unit === 'month' ? 'selected' : ''}>Per month</option>
+              ${CHAIR_TYPES.map(t => `<option value="${t}" ${e.chair_type === t ? 'selected' : ''}>${t}</option>`).join('')}
             </select>
           </div>
         </div>
-        <div class="field"><label>Space type</label>
-          <select name="chair_type" required>
-            <option value="">Choose one</option>
-            ${CHAIR_TYPES.map(t => `<option value="${t}" ${e.chair_type === t ? 'selected' : ''}>${t}</option>`).join('')}
-          </select>
+
+        <div class="step-panel" data-panel="1" hidden>
+          <div class="row-2">
+            <div class="field"><label>City</label><input type="text" name="city" required value="${escapeHtml(e.city || '')}" /></div>
+            <div class="field"><label>State</label><input type="text" name="state" required value="${escapeHtml(e.state || '')}" maxlength="2" placeholder="TX" /></div>
+          </div>
+          <div class="row-2">
+            <div class="field"><label>Street address (optional)</label><input type="text" name="address" value="${escapeHtml(e.address || '')}" /></div>
+            <div class="field"><label>ZIP (optional)</label><input type="text" name="zip" value="${escapeHtml(e.zip || '')}" /></div>
+          </div>
+          <div class="field"><label>Total chairs in shop (optional)</label><input type="number" name="total_chairs" min="1" step="1" placeholder="e.g. 6" value="${e.total_chairs || ''}" /></div>
         </div>
-        <div class="field"><label>Amenities</label>
-          <div class="checkbox-grid">
-            ${AMENITY_OPTIONS.map(a => `<label><input type="checkbox" name="amenities" value="${a}" ${(e.amenities || []).includes(a) ? 'checked' : ''}/> ${a}</label>`).join('')}
+
+        <div class="step-panel" data-panel="2" hidden>
+          <div class="row-2">
+            <div class="field"><label>Price</label><input type="number" name="price" min="0" step="1" required value="${e.price || ''}" /></div>
+            <div class="field"><label>Billing period</label>
+              <select name="price_unit" required>
+                <option value="">Choose one</option>
+                <option value="hour" ${e.price_unit === 'hour' ? 'selected' : ''}>Per hour</option>
+                <option value="day" ${e.price_unit === 'day' ? 'selected' : ''}>Per day</option>
+                <option value="week" ${e.price_unit === 'week' ? 'selected' : ''}>Per week</option>
+                <option value="month" ${e.price_unit === 'month' ? 'selected' : ''}>Per month</option>
+              </select>
+            </div>
+          </div>
+          <div class="field"><label>Available from (leave blank if available now)</label><input type="date" name="available_from" value="${escapeHtml(e.available_from || '')}" /></div>
+        </div>
+
+        <div class="step-panel" data-panel="3" hidden>
+          <div class="field">
+            <label>Photos <span class="card-meta">(up to 5 images, 5MB max each)</span></label>
+            <div id="existing-photos" class="photo-thumb-row"></div>
+            <div id="photo-dropzone" class="photo-dropzone" onclick="document.getElementById('photo-input').click()">
+              <span>📷 Click to choose photos, or drag &amp; drop them here</span>
+            </div>
+            <input type="file" id="photo-input" accept="image/*" multiple style="display:none" onchange="App.handlePhotoSelect(event)" />
+            <div id="new-photo-previews" class="photo-thumb-row"></div>
+            <div id="photo-msg"></div>
           </div>
         </div>
-        <button class="pill-btn" type="submit">${editId ? 'Save changes' : 'Publish listing'}</button>
+
+        <div class="step-nav">
+          <button type="button" class="pill-btn ghost" id="step-back" onclick="App.stepBack()" style="visibility:hidden;">Back</button>
+          <button type="button" class="pill-btn" id="step-next" onclick="App.stepNext()">Next</button>
+          <button class="pill-btn" type="submit" id="step-submit" style="display:none;">${editId ? 'Save changes' : 'Publish listing'}</button>
+        </div>
         <div id="listing-msg"></div>
       </form>
     `;
+    renderExistingPhotoThumbs();
+    setupDropzone();
+  }
+
+  function showStep(idx) {
+    document.querySelectorAll('.step-panel').forEach((p) => {
+      p.hidden = Number(p.dataset.panel) !== idx;
+    });
+    document.querySelectorAll('.step-dot').forEach((d) => {
+      const n = Number(d.dataset.step);
+      d.classList.toggle('active', n === idx);
+      d.classList.toggle('done', n < idx);
+    });
+    const back = document.getElementById('step-back');
+    const next = document.getElementById('step-next');
+    const submit = document.getElementById('step-submit');
+    const lastStep = POST_STEPS.length - 1;
+    if (back) back.style.visibility = idx === 0 ? 'hidden' : 'visible';
+    if (next) next.style.display = idx === lastStep ? 'none' : '';
+    if (submit) submit.style.display = idx === lastStep ? '' : 'none';
+    postListingState.step = idx;
+  }
+
+  function validatePanel(idx) {
+    const panel = document.querySelector(`.step-panel[data-panel="${idx}"]`);
+    if (!panel) return true;
+    const required = panel.querySelectorAll('[required]');
+    for (const field of required) {
+      if (!field.value || !field.value.trim()) {
+        field.reportValidity ? field.reportValidity() : field.focus();
+        field.focus();
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function stepNext() {
+    if (!validatePanel(postListingState.step)) return;
+    if (postListingState.step < POST_STEPS.length - 1) showStep(postListingState.step + 1);
+  }
+
+  function stepBack() {
+    if (postListingState.step > 0) showStep(postListingState.step - 1);
+  }
+
+  function renderExistingPhotoThumbs() {
+    const el = document.getElementById('existing-photos');
+    if (!el) return;
+    if (!postListingState.existingPhotos.length) { el.innerHTML = ''; return; }
+    el.innerHTML = postListingState.existingPhotos.map((src) => `
+      <div class="photo-thumb"><img src="${src}" alt="listing photo" /></div>
+    `).join('');
+  }
+
+  function renderNewPhotoPreviews() {
+    const el = document.getElementById('new-photo-previews');
+    if (!el) return;
+    el.innerHTML = postListingState.files.map((f, i) => `
+      <div class="photo-thumb">
+        <img src="${f.previewUrl}" alt="${escapeHtml(f.file.name)}" />
+        <button type="button" class="photo-remove" onclick="App.removeNewPhoto(${i})">&times;</button>
+      </div>
+    `).join('');
+  }
+
+  function handlePhotoSelect(evt) {
+    addPhotoFiles(Array.from(evt.target.files || []));
+    evt.target.value = '';
+  }
+
+  function addPhotoFiles(fileList) {
+    const msgEl = document.getElementById('photo-msg');
+    if (msgEl) msgEl.innerHTML = '';
+    const totalExisting = postListingState.existingPhotos.length + postListingState.files.length;
+    const room = 5 - totalExisting;
+    const errors = [];
+    if (room <= 0) {
+      errors.push('You can have at most 5 photos total. Remove one to add another.');
+    } else {
+      let added = 0;
+      for (const file of fileList) {
+        if (added >= room) { errors.push(`Only ${room} more photo(s) can be added (5 max).`); break; }
+        if (!file.type.startsWith('image/')) { errors.push(`${file.name} isn't a supported image file.`); continue; }
+        if (file.size > 5 * 1024 * 1024) { errors.push(`${file.name} is larger than 5MB.`); continue; }
+        postListingState.files.push({ file, previewUrl: URL.createObjectURL(file) });
+        added++;
+      }
+    }
+    if (errors.length && msgEl) msgEl.innerHTML = `<p class="msg">${escapeHtml(errors.join(' '))}</p>`;
+    renderNewPhotoPreviews();
+  }
+
+  function removeNewPhoto(i) {
+    postListingState.files.splice(i, 1);
+    renderNewPhotoPreviews();
+  }
+
+  function setupDropzone() {
+    const zone = document.getElementById('photo-dropzone');
+    if (!zone) return;
+    ['dragover', 'dragenter'].forEach((evt) => zone.addEventListener(evt, (ev) => { ev.preventDefault(); zone.classList.add('drag'); }));
+    ['dragleave', 'dragend'].forEach((evt) => zone.addEventListener(evt, () => zone.classList.remove('drag')));
+    zone.addEventListener('drop', (ev) => {
+      ev.preventDefault();
+      zone.classList.remove('drag');
+      addPhotoFiles(Array.from(ev.dataTransfer.files || []));
+    });
+  }
+
+  async function uploadListingPhotos(listingId, files) {
+    const fd = new FormData();
+    for (const file of files) fd.append('photos', file, file.name);
+    const headers = {};
+    if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+    const res = await fetch('/api/listings/' + listingId + '/photos', { method: 'POST', headers, body: fd });
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* no body */ }
+    if (!res.ok) throw new Error(data.error || 'Photo upload failed');
+    return data;
   }
 
   async function saveListing(evt, editId) {
     evt.preventDefault();
+    if (!validatePanel(postListingState.step)) return;
     const f = new FormData(evt.target);
-    const amenities = f.getAll('amenities');
     const msgEl = document.getElementById('listing-msg');
     const payload = {
       title: f.get('title'), description: f.get('description'),
       city: f.get('city'), state: f.get('state'), address: f.get('address'), zip: f.get('zip'),
       price: Number(f.get('price')), price_unit: f.get('price_unit'), chair_type: f.get('chair_type'),
-      amenities,
+      available_from: f.get('available_from') || null,
+      total_chairs: f.get('total_chairs') || null,
     };
     try {
       let listing;
@@ -489,6 +675,10 @@ const App = (() => {
         const data = await api('/api/listings', { method: 'POST', body: payload });
         listing = data.listing;
       }
+      if (postListingState.files.length > 0) {
+        msgEl.innerHTML = `<p class="card-meta">Uploading photos...</p>`;
+        await uploadListingPhotos(listing.id, postListingState.files.map((x) => x.file));
+      }
       nav('/listing/' + listing.id);
     } catch (e) {
       msgEl.innerHTML = `<p class="msg">${escapeHtml(e.message)}</p>`;
@@ -498,7 +688,7 @@ const App = (() => {
   // ---------- dashboard ----------
   async function renderDashboard() {
     if (!state.user) {
-      $app().innerHTML = `<p class="msg">Log in to see your dashboard. <a href="#/login" style="color:var(--amber-dark);font-weight:700;">Log in</a></p>`;
+      $app().innerHTML = `<p class="msg">Log in to see your dashboard. <a href="#/login" style="color:var(--blue-dark);font-weight:700;">Log in</a></p>`;
       return;
     }
     if (state.user.role === 'owner') return renderOwnerDashboard();
@@ -660,7 +850,7 @@ const App = (() => {
   }
 
   function renderNotFound() {
-    $app().innerHTML = `<div class="empty-state">Page not found. <a href="#/" style="color:var(--amber-dark);font-weight:700;">Go home</a></div>`;
+    $app().innerHTML = `<div class="empty-state">Page not found. <a href="#/" style="color:var(--blue-dark);font-weight:700;">Go home</a></div>`;
   }
 
   // ---------- boot ----------
@@ -684,6 +874,6 @@ const App = (() => {
   return {
     nav, searchSubmit, doLogin, doSignup, setSignupRole, logout,
     sendRequest, toggleActive, saveListing, showOwnerTab, updateRequest,
-    sendMessage,
+    sendMessage, stepNext, stepBack, handlePhotoSelect, removeNewPhoto,
   };
 })();
