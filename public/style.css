@@ -675,7 +675,7 @@ footer.site {
 
 .spinner-note { color: var(--muted); padding: 30px; text-align: center; }
 
-/* map embed on listing detail */
+/* map embed on listing detail (Leaflet + CARTO Voyager tiles) */
 .map-embed {
   margin-top: 18px;
   border-radius: var(--radius);
@@ -683,7 +683,27 @@ footer.site {
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
 }
-.map-embed iframe { width: 100%; height: 260px; border: none; display: block; }
+#listing-map { width: 100%; height: 260px; background: #EEF1F5; font-family: inherit; }
+.leaflet-container { font-family: inherit; }
+/* soften Leaflet's default chrome to match the app's palette instead of the stock look */
+.leaflet-control-zoom a {
+  color: var(--ink) !important;
+  border-radius: 6px !important;
+}
+.leaflet-control-zoom { border: none !important; box-shadow: var(--shadow) !important; }
+.leaflet-control-attribution {
+  background: rgba(255, 255, 255, 0.82) !important;
+  font-size: 0.68rem !important;
+}
+.chairspace-pin span {
+  display: block;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--blue);
+  border: 3px solid #fff;
+  box-shadow: 0 2px 8px rgba(11, 132, 214, 0.55), 0 0 0 1px rgba(16, 24, 40, 0.08);
+}
 
 /* reviews */
 .review-avg { display: flex; align-items: center; gap: 8px; margin: 4px 0 14px; color: #d8a300; font-size: 1.1rem; }

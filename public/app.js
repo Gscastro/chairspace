@@ -118,6 +118,7 @@ const App = (() => {
 
   async function router() {
     closeMenu();
+    destroyActiveMap();
     const { path, query } = parseLocation();
     renderNav();
     const segs = path.split('/').filter(Boolean);
@@ -366,14 +367,41 @@ const App = (() => {
     return `<div class="hero-wrap">${mediaHtml}${overlay}</div>`;
   }
 
-  // Free OpenStreetMap embed — no API key needed. Lat/lon are geocoded
-  // server-side from the listing's address when it's created or edited.
-  function mapEmbedHtml(l) {
+  // A real interactive map (Leaflet + CARTO's free Voyager tiles) instead of
+  // the old raw openstreetmap.org iframe embed, which drags in that site's
+  // own header/search/edit chrome and looks dated. No API key needed for
+  // either Leaflet or the CARTO basemap. Lat/lon are geocoded server-side
+  // from the listing's address when it's created or edited.
+  let activeMap = null;
+
+  function destroyActiveMap() {
+    if (activeMap) {
+      activeMap.remove();
+      activeMap = null;
+    }
+  }
+
+  function mapContainerHtml(l) {
     if (l.lat == null || l.lon == null) return '';
-    const d = 0.01;
-    const bbox = [l.lon - d, l.lat - d, l.lon + d, l.lat + d].join('%2C');
-    const src = `https://www.openstreetmap.org/export/embed.html?bbox=${bbox}&layer=mapnik&marker=${l.lat}%2C${l.lon}`;
-    return `<div class="map-embed"><iframe src="${src}" loading="lazy" title="Map of ${escapeHtml(l.city)}, ${escapeHtml(l.state)}"></iframe></div>`;
+    return `<div class="map-embed"><div id="listing-map" role="img" aria-label="Map showing the approximate location in ${escapeHtml(l.city)}, ${escapeHtml(l.state)}"></div></div>`;
+  }
+
+  function initListingMap(l) {
+    if (l.lat == null || l.lon == null) return;
+    destroyActiveMap();
+    const el = document.getElementById('listing-map');
+    if (!el || typeof L === 'undefined') return;
+    activeMap = L.map(el, { scrollWheelZoom: false, attributionControl: true }).setView([l.lat, l.lon], 14);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>',
+      maxZoom: 19,
+      subdomains: 'abcd',
+    }).addTo(activeMap);
+    const icon = L.divIcon({ className: 'chairspace-pin', html: '<span></span>', iconSize: [22, 22], iconAnchor: [11, 11] });
+    L.marker([l.lat, l.lon], { icon, keyboard: false }).addTo(activeMap);
+    // re-enable scroll-zoom once the visitor has clicked in, so scrolling the
+    // page past the map doesn't accidentally zoom it
+    el.addEventListener('click', () => activeMap && activeMap.scrollWheelZoom.enable(), { once: true });
   }
 
   function star(n) { return '★'.repeat(n) + '☆'.repeat(5 - n); }
@@ -449,7 +477,7 @@ const App = (() => {
           ${heroSectionHtml(l)}
           <div class="card-meta" style="margin-top:14px;">${escapeHtml(l.address ? l.address + ', ' : '')}${escapeHtml(l.city)}, ${escapeHtml(l.state)} ${escapeHtml(l.zip || '')}${l.total_chairs ? ' &middot; ' + l.total_chairs + '-chair shop' : ''}</div>
           <p>${escapeHtml(l.description || 'No description provided.')}</p>
-          ${mapEmbedHtml(l)}
+          ${mapContainerHtml(l)}
           <h3>Hosted by</h3>
           <p class="card-meta">${escapeHtml(l.owner.name)}${l.owner.bio ? ' — ' + escapeHtml(l.owner.bio) : ''}</p>
         </div>
@@ -497,6 +525,7 @@ const App = (() => {
       area.innerHTML = `<p class="card-meta">Space owner accounts can't request other listings — log in as a barber to request this spot.</p>`;
     }
 
+    initListingMap(l);
     loadListingReviews(l.id);
   }
 
