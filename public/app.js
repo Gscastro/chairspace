@@ -394,18 +394,66 @@ const App = (() => {
     if (l.lat == null || l.lon == null) return;
     destroyActiveMap();
     const el = document.getElementById('listing-map');
-    if (!el || typeof L === 'undefined') return;
-    activeMap = L.map(el, { scrollWheelZoom: false, attributionControl: true }).setView([l.lat, l.lon], 14);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>',
-      maxZoom: 19,
-      subdomains: 'abcd',
-    }).addTo(activeMap);
-    const icon = L.divIcon({ className: 'chairspace-pin', html: '<span></span>', iconSize: [22, 22], iconAnchor: [11, 11] });
-    L.marker([l.lat, l.lon], { icon, keyboard: false }).addTo(activeMap);
-    // re-enable scroll-zoom once the visitor has clicked in, so scrolling the
-    // page past the map doesn't accidentally zoom it
-    el.addEventListener('click', () => activeMap && activeMap.scrollWheelZoom.enable(), { once: true });
+    if (!el) return;
+    // If Leaflet didn't load (CDN blocked, offline, flaky connection), show the
+    // address and a directions link rather than leaving an empty gray box.
+    if (typeof L === 'undefined') return showMapFallback(el, l);
+    try {
+      activeMap = L.map(el, { scrollWheelZoom: false, attributionControl: true }).setView([l.lat, l.lon], 14);
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>',
+        maxZoom: 19,
+        subdomains: 'abcd',
+      }).addTo(activeMap);
+      const icon = L.divIcon({ className: 'chairspace-pin', html: '<span></span>', iconSize: [22, 22], iconAnchor: [11, 11] });
+      L.marker([l.lat, l.lon], { icon, keyboard: false }).addTo(activeMap);
+      // re-enable scroll-zoom once the visitor has clicked in, so scrolling the
+      // page past the map doesn't accidentally zoom it
+      el.addEventListener('click', () => activeMap && activeMap.scrollWheelZoom.enable(), { once: true });
+    } catch (e) {
+      console.error('[map error]', e.message);
+      activeMap = null;
+      showMapFallback(el, l);
+    }
+  }
+
+  function showMapFallback(el, l) {
+    const addr = formatAddress(l);
+    const url = directionsUrl(l);
+    el.classList.add('map-fallback');
+    el.removeAttribute('role'); // no longer a picture — it's real content now
+    el.removeAttribute('aria-label');
+    el.innerHTML = `
+      <div class="brand-mark" aria-hidden="true"><span>📍</span></div>
+      ${addr ? `<div class="map-fallback-addr">${escapeHtml(addr)}</div>` : ''}
+      ${url ? `<a class="cta-secondary" href="${url}" target="_blank" rel="noopener">Get directions</a>` : ''}
+    `;
+  }
+
+  // tel: link for an owner's phone number (returns null if there's no usable number)
+  function telHref(phone) {
+    if (!phone) return null;
+    const digits = String(phone).replace(/\D/g, '');
+    if (digits.length < 7) return null;
+    return 'tel:' + (digits.length === 10 ? '+1' + digits : (digits.length === 11 && digits[0] === '1' ? '+' + digits : digits));
+  }
+
+  // "1420 E 6th St, Austin, TX 78702" — note the ZIP follows the state with a
+  // space, not a comma, which is the standard US format.
+  function formatAddress(l) {
+    const cityState = [l.city, l.state].filter(Boolean).join(', ');
+    const tail = [cityState, l.zip].filter(Boolean).join(' ');
+    return [l.address, tail].filter(Boolean).join(', ');
+  }
+
+  // Opens the listing's address in the visitor's maps app (Google Maps links
+  // hand off to Apple Maps / the native app on phones). Falls back to the
+  // geocoded coordinates if the listing has no street address.
+  function directionsUrl(l) {
+    const addr = formatAddress(l);
+    if (addr) return 'https://www.google.com/maps/dir/?api=1&destination=' + encodeURIComponent(addr);
+    if (l.lat != null && l.lon != null) return 'https://www.google.com/maps/dir/?api=1&destination=' + l.lat + ',' + l.lon;
+    return null;
   }
 
   function star(n) { return '★'.repeat(n) + '☆'.repeat(5 - n); }
@@ -493,6 +541,12 @@ const App = (() => {
             </div>
             <p class="card-meta cancellation-note"><b>${POLICY_INFO[l.cancellation_policy] ? POLICY_INFO[l.cancellation_policy].label : 'Standard'} cancellation</b> — ${escapeHtml(POLICY_INFO[l.cancellation_policy] ? POLICY_INFO[l.cancellation_policy].desc : POLICY_INFO.standard.desc)}</p>
             ${!isOwnerOfThis ? `<button class="pill-btn contact-owner-btn" type="button" onclick="App.openContactModal(${l.id})">Contact Owner</button>` : ''}
+            ${!isOwnerOfThis ? `
+              <div class="cta-row">
+                ${telHref(l.owner.phone) ? `<a class="cta-secondary" href="${telHref(l.owner.phone)}">📞 Call</a>` : ''}
+                ${directionsUrl(l) ? `<a class="cta-secondary" href="${directionsUrl(l)}" target="_blank" rel="noopener">📍 Directions</a>` : ''}
+              </div>
+            ` : ''}
             <div id="request-area" style="margin-top:14px;"></div>
           </div>
         </div>
@@ -501,8 +555,9 @@ const App = (() => {
       ${!isOwnerOfThis ? `
         <div class="mobile-cta-spacer" aria-hidden="true"></div>
         <div class="mobile-cta-bar">
-          <div class="mobile-cta-price">${money(l.price)}<span class="unit">${unitLabel(l.price_unit)}</span></div>
           <button class="pill-btn" type="button" onclick="App.openContactModal(${l.id})">Contact Owner</button>
+          ${telHref(l.owner.phone) ? `<a class="cta-secondary" href="${telHref(l.owner.phone)}">📞 Call</a>` : ''}
+          ${directionsUrl(l) ? `<a class="cta-secondary" href="${directionsUrl(l)}" target="_blank" rel="noopener">📍 Directions</a>` : ''}
         </div>
       ` : ''}
     `;
