@@ -133,6 +133,7 @@ const App = (() => {
       if (segs[0] === 'login') return renderLogin();
       if (segs[0] === 'signup') return renderSignup();
       if (segs[0] === 'dashboard') return renderDashboard();
+      if (segs[0] === 'profile') return renderProfile();
       if (segs[0] === 'post-listing') return renderPostListing();
       if (segs[0] === 'edit-listing' && segs[1]) return renderPostListing(segs[1]);
       if (segs[0] === 'requests' && segs[1]) return renderThread(segs[1]);
@@ -157,6 +158,7 @@ const App = (() => {
       <a href="/" onclick="event.preventDefault(); App.nav('/');">Browse Chairs</a>
       ${state.user.role === 'owner' ? `<a href="/post-listing" onclick="event.preventDefault(); App.nav('/post-listing');">+ Post a Listing</a>` : ''}
       <a href="/dashboard" onclick="event.preventDefault(); App.nav('/dashboard');">${dashLabel}</a>
+      <a href="/profile" onclick="event.preventDefault(); App.nav('/profile');">My Profile</a>
       <span class="nav-greeting">Hi, ${escapeHtml(state.user.name.split(' ')[0])}</span>
       <button class="pill-btn ghost small" onclick="App.logout()">Log out</button>
     `;
@@ -387,7 +389,11 @@ const App = (() => {
 
   function mapContainerHtml(l) {
     if (l.lat == null || l.lon == null) return '';
-    return `<div class="map-embed"><div id="listing-map" role="img" aria-label="Map showing the approximate location in ${escapeHtml(l.city)}, ${escapeHtml(l.state)}"></div></div>`;
+    const approx = l.geo_precision === 'city';
+    return `<div class="map-embed">
+      <div id="listing-map" role="img" aria-label="Map showing the ${approx ? 'general area' : 'approximate location'} in ${escapeHtml(l.city)}, ${escapeHtml(l.state)}"></div>
+      ${approx ? `<div class="map-note">General area only — the owner shares the exact address when you connect.</div>` : ''}
+    </div>`;
   }
 
   function initListingMap(l) {
@@ -398,15 +404,29 @@ const App = (() => {
     // If Leaflet didn't load (CDN blocked, offline, flaky connection), show the
     // address and a directions link rather than leaving an empty gray box.
     if (typeof L === 'undefined') return showMapFallback(el, l);
+    // When only the city could be located, a precise pin would be a lie — show
+    // a soft area circle at a wider zoom instead.
+    const approx = l.geo_precision === 'city';
     try {
-      activeMap = L.map(el, { scrollWheelZoom: false, attributionControl: true }).setView([l.lat, l.lon], 14);
+      activeMap = L.map(el, { scrollWheelZoom: false, attributionControl: true }).setView([l.lat, l.lon], approx ? 12 : 14);
       L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>',
         maxZoom: 19,
         subdomains: 'abcd',
       }).addTo(activeMap);
-      const icon = L.divIcon({ className: 'chairspace-pin', html: '<span></span>', iconSize: [22, 22], iconAnchor: [11, 11] });
-      L.marker([l.lat, l.lon], { icon, keyboard: false }).addTo(activeMap);
+      if (approx) {
+        L.circle([l.lat, l.lon], {
+          radius: 2200,
+          color: '#0B84D6',
+          weight: 2,
+          opacity: 0.65,
+          fillColor: '#0B84D6',
+          fillOpacity: 0.12,
+        }).addTo(activeMap);
+      } else {
+        const icon = L.divIcon({ className: 'chairspace-pin', html: '<span></span>', iconSize: [22, 22], iconAnchor: [11, 11] });
+        L.marker([l.lat, l.lon], { icon, keyboard: false }).addTo(activeMap);
+      }
       // re-enable scroll-zoom once the visitor has clicked in, so scrolling the
       // page past the map doesn't accidentally zoom it
       el.addEventListener('click', () => activeMap && activeMap.scrollWheelZoom.enable(), { once: true });
@@ -1275,6 +1295,222 @@ const App = (() => {
     }
   }
 
+  // ---------- my profile ----------
+
+  const SPECIALTY_OPTIONS = [
+    'Fades', 'Beard work', 'Tapers', 'Line-ups', "Kids' cuts",
+    'Color', 'Locs', 'Straight razor', 'Braids', 'Hot towel shaves',
+  ];
+
+  let profileSpecialties = [];
+
+  function avatarHtml(user, size) {
+    const cls = size === 'lg' ? 'avatar lg' : 'avatar';
+    if (user && user.photo_url) {
+      return `<div class="${cls}"><img src="${escapeHtml(user.photo_url)}" alt="${escapeHtml(user.name || 'Profile photo')}" /></div>`;
+    }
+    return `<div class="${cls}"><span>💈</span></div>`;
+  }
+
+  function memberSince(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    return ' · Member since ' + d.toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+  }
+
+  function renderProfile() {
+    if (!state.user) {
+      $app().innerHTML = `
+        <div class="card auth">
+          <h2>My Profile</h2>
+          <p class="card-meta">Log in to view and edit your profile.</p>
+          <button class="pill-btn" onclick="App.nav('/login')">Log in</button>
+        </div>`;
+      return;
+    }
+    const u = state.user;
+    const isBarber = u.role === 'barber';
+    profileSpecialties = Array.isArray(u.specialties) ? u.specialties.slice() : [];
+    // any custom specialty the person already has that isn't in our preset list
+    const allSpecialties = SPECIALTY_OPTIONS.concat(profileSpecialties.filter((s) => !SPECIALTY_OPTIONS.includes(s)));
+
+    $app().innerHTML = `
+      <div class="form-page">
+        <div class="profile-head">
+          ${avatarHtml(u, 'lg')}
+          <div>
+            <h1>${escapeHtml(u.name)}</h1>
+            <p class="card-meta" style="margin:0;">${isBarber ? 'Barber' : 'Space owner'}${memberSince(u.created_at)}</p>
+          </div>
+        </div>
+
+        <div class="section">
+          <h3>Photo</h3>
+          <div class="photo-actions">
+            <input type="file" id="avatar-input" accept="image/*" hidden onchange="App.uploadAvatar(event)" />
+            <button class="pill-btn ghost" type="button" onclick="document.getElementById('avatar-input').click()">
+              ${u.photo_url ? 'Change photo' : 'Upload a photo'}
+            </button>
+            <span id="avatar-msg" class="hint"></span>
+          </div>
+          <p class="hint">A real face gets far more replies than a blank avatar.</p>
+        </div>
+
+        <form class="stack" onsubmit="App.saveProfile(event)">
+          <div class="section">
+            <h3>Basics</h3>
+            <div class="stack">
+              <div class="field"><label>Full name</label><input type="text" name="name" required value="${escapeHtml(u.name || '')}" /></div>
+              <div class="row-2">
+                <div class="field"><label>Phone</label><input type="tel" name="phone" value="${escapeHtml(u.phone || '')}" placeholder="Optional" /></div>
+                <div class="field"><label>${isBarber ? 'City you work in' : 'City'}</label><input type="text" name="city" value="${escapeHtml(u.city || '')}" placeholder="Optional" /></div>
+              </div>
+              <div class="field">
+                <label>About you</label>
+                <textarea name="bio" rows="3" placeholder="${isBarber ? 'Tell shop owners about your experience...' : 'Tell barbers about your shop...'}">${escapeHtml(u.bio || '')}</textarea>
+                <p class="hint">${isBarber ? 'Shop owners read this first when you send a request.' : 'Barbers see this on your listings.'}</p>
+              </div>
+            </div>
+          </div>
+
+          ${isBarber ? `
+            <div class="section">
+              <h3>Your work</h3>
+              <div class="stack">
+                <div class="row-2">
+                  <div class="field"><label>Instagram</label><input type="text" name="instagram" value="${escapeHtml(u.instagram || '')}" placeholder="@yourhandle" /></div>
+                  <div class="field"><label>Years cutting</label><input type="number" name="years_experience" min="0" max="70" value="${u.years_experience == null ? '' : u.years_experience}" placeholder="Optional" /></div>
+                </div>
+                <div class="field">
+                  <label>Specialties</label>
+                  <div class="chip-row" id="specialty-chips">
+                    ${allSpecialties.map((s) => `
+                      <button type="button" class="chip${profileSpecialties.includes(s) ? ' on' : ''}" onclick="App.toggleSpecialty(this, '${escapeHtml(s).replace(/'/g, "\\'")}')">${escapeHtml(s)}</button>
+                    `).join('')}
+                  </div>
+                  <p class="hint">Tap the ones that apply.</p>
+                </div>
+              </div>
+            </div>
+
+          ` : `
+            <div class="section">
+              <h3>Your shop</h3>
+              <div class="stack">
+                <div class="field"><label>Shop name</label><input type="text" name="shop_name" value="${escapeHtml(u.shop_name || '')}" placeholder="Optional" /></div>
+                <div class="field"><label>Website or Instagram</label><input type="text" name="website" value="${escapeHtml(u.website || '')}" placeholder="Optional" /></div>
+              </div>
+            </div>
+          `}
+
+          <div class="section">
+            <h3>Account</h3>
+            <div class="stack">
+              <div class="field">
+                <label>Email</label>
+                <input type="email" name="email" required value="${escapeHtml(u.email || '')}" />
+                <p class="hint">This is what you log in with.</p>
+              </div>
+            </div>
+          </div>
+
+          <button class="pill-btn" type="submit" style="width:100%;">Save changes</button>
+          <div id="profile-msg"></div>
+        </form>
+
+        <div class="section" style="margin-top:26px;">
+          <h3>Password</h3>
+          <form class="stack" onsubmit="App.changePassword(event)">
+            <div class="field"><label>Current password</label><input type="password" name="current_password" required /></div>
+            <div class="field"><label>New password</label><input type="password" name="new_password" required minlength="6" /></div>
+            <button class="pill-btn ghost" type="submit">Change password</button>
+            <div id="password-msg"></div>
+          </form>
+        </div>
+      </div>
+    `;
+  }
+
+  function toggleSpecialty(btn, name) {
+    const i = profileSpecialties.indexOf(name);
+    if (i === -1) profileSpecialties.push(name);
+    else profileSpecialties.splice(i, 1);
+    btn.classList.toggle('on', i === -1);
+  }
+
+  async function saveProfile(evt) {
+    evt.preventDefault();
+    const f = new FormData(evt.target);
+    const msgEl = document.getElementById('profile-msg');
+    const body = {
+      name: f.get('name'),
+      email: f.get('email'),
+      phone: f.get('phone'),
+      city: f.get('city'),
+      bio: f.get('bio'),
+    };
+    if (state.user.role === 'barber') {
+      body.instagram = f.get('instagram');
+      body.years_experience = f.get('years_experience');
+      body.specialties = profileSpecialties;
+    } else {
+      body.shop_name = f.get('shop_name');
+      body.website = f.get('website');
+    }
+    try {
+      const { user } = await api('/api/me', { method: 'PATCH', body });
+      state.user = user;
+      renderNav();
+      msgEl.innerHTML = `<p class="msg ok">Saved.</p>`;
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (e) {
+      msgEl.innerHTML = `<p class="msg">${escapeHtml(e.message)}</p>`;
+    }
+  }
+
+  async function changePassword(evt) {
+    evt.preventDefault();
+    const f = new FormData(evt.target);
+    const msgEl = document.getElementById('password-msg');
+    try {
+      await api('/api/me/password', {
+        method: 'POST',
+        body: { current_password: f.get('current_password'), new_password: f.get('new_password') },
+      });
+      evt.target.reset();
+      msgEl.innerHTML = `<p class="msg ok">Password changed.</p>`;
+    } catch (e) {
+      msgEl.innerHTML = `<p class="msg">${escapeHtml(e.message)}</p>`;
+    }
+  }
+
+  async function uploadAvatar(evt) {
+    const file = evt.target.files && evt.target.files[0];
+    if (!file) return;
+    const msgEl = document.getElementById('avatar-msg');
+    msgEl.textContent = 'Uploading...';
+    try {
+      // reuse the same client-side shrink the listing photos get, so a big
+      // phone photo doesn't become a slow upload — avatars display small, so
+      // they don't need anywhere near the listing photos' 1600px
+      const shrunk = await compressImage(file, 600, 0.85);
+      const fd = new FormData();
+      fd.append('photo', shrunk, shrunk.name || 'photo.jpg');
+      const headers = {};
+      if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+      const res = await fetch('/api/me/photo', { method: 'POST', headers, body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Upload failed');
+      state.user = data.user;
+      msgEl.textContent = '';
+      renderProfile();
+      renderNav();
+    } catch (e) {
+      msgEl.textContent = e.message;
+    }
+  }
+
   // ---------- messaging thread ----------
   async function renderThread(id) {
     $app().innerHTML = `<p class="spinner-note">Loading conversation...</p>`;
@@ -1441,5 +1677,6 @@ const App = (() => {
     heroNext, heroPrev, heroGoTo, openContactModal, closeContactModal, submitInquiry,
     toggleMenu, toggleFavorite, showBarberTab, saveCurrentSearch, deleteSavedSearch,
     pickStar, submitReview,
+    saveProfile, changePassword, uploadAvatar, toggleSpecialty,
   };
 })();

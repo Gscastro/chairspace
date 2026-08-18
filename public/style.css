@@ -546,7 +546,44 @@ h2.section-title { font-size: 1.4rem; margin: 46px 0 18px; font-weight: 800; let
   .mobile-cta-bar .cta-secondary { flex: 1; padding: 10px 8px; font-size: 0.85rem; }
   /* keeps page content (esp. reviews) from being hidden behind the fixed bar */
   .mobile-cta-spacer { display: block; height: 72px; }
+  /* The sticky bar already offers these actions on every screen, so repeating
+     them inside the price card is just clutter on mobile. They stay visible on
+     desktop, where there's no sticky bar. */
+  .side-card .contact-owner-btn,
+  .side-card .cta-row { display: none; }
 }
+
+/* ---------- my profile ---------- */
+.profile-head { display: flex; align-items: center; gap: 16px; margin-bottom: 22px; }
+.profile-head h1 { margin: 0 0 2px; font-size: 1.45rem; }
+.avatar {
+  width: 56px; height: 56px; border-radius: 999px; flex-shrink: 0; overflow: hidden;
+  background:
+    repeating-linear-gradient(135deg, rgba(11,132,214,.05) 0 14px, rgba(11,132,214,0) 14px 28px),
+    linear-gradient(135deg, #EAF6FF 0%, #DCEFFC 60%, #CDE7F9 100%);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.4rem;
+  box-shadow: 0 0 0 1px rgba(16,24,40,.08);
+}
+.avatar.lg { width: 76px; height: 76px; font-size: 1.9rem; }
+.avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.section { margin-bottom: 26px; }
+.section h3 {
+  margin: 0 0 12px; font-size: .95rem; font-weight: 700;
+  padding-bottom: 8px; border-bottom: 1px solid var(--line);
+}
+.optional-note { font-weight: 500; color: var(--muted); }
+.photo-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  padding: 7px 13px; border-radius: 999px; border: 1px solid var(--line);
+  background: #fff; font-size: .85rem; font-weight: 600; cursor: pointer;
+  font-family: inherit; color: var(--ink);
+  transition: background .15s, border-color .15s, color .15s;
+}
+.chip:hover { border-color: var(--blue); }
+.chip.on { background: var(--blue-light); border-color: var(--blue); color: var(--blue-dark); }
+.hint { color: var(--muted); font-size: .8rem; margin: 5px 0 0; }
 
 /* forms */
 form.stack { display: flex; flex-direction: column; gap: 14px; max-width: 520px; }
@@ -785,6 +822,15 @@ footer.site {
     linear-gradient(135deg, #EAF6FF 0%, #DCEFFC 60%, #CDE7F9 100%);
 }
 .map-fallback-addr { font-size: 0.9rem; font-weight: 600; color: var(--ink); }
+/* caption under a city-level (approximate) map */
+.map-note {
+  padding: 8px 12px;
+  background: var(--blue-light);
+  border-top: 1px solid var(--line);
+  color: #3d4451;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
 #listing-map.map-fallback .cta-secondary { flex: 0 0 auto; }
 .leaflet-container { font-family: inherit; }
 /* soften Leaflet's default chrome to match the app's palette instead of the stock look */
