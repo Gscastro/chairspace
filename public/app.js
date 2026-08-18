@@ -34,21 +34,25 @@ const App = (() => {
     return { hour: '/hr', day: '/day', week: '/wk', month: '/mo' }[u] || '';
   }
 
-  function photoUrl(seed, w = 400, h = 300) {
-    return `https://picsum.photos/seed/${encodeURIComponent(seed || 'chairspace')}/${w}/${h}`;
+  // Branded placeholder for listings without uploaded photos. This used to
+  // pull a random stock photo from picsum.photos, which could show anything
+  // (mountains, coffee cups...) — confusing on a marketplace where the photo
+  // is supposed to be the actual shop. A clean ChairSpace-branded tile reads
+  // as intentional instead of misleading.
+  function brandMarkHtml() {
+    return '<div class="brand-mark" aria-hidden="true"><span>💈</span></div>';
   }
 
-  // Renders a photo area that falls back to a tasteful placeholder (no broken-image
-  // icon) if the remote image host can't be reached. Prefers a real uploaded photo
-  // over the placeholder-seed image when the listing has one.
   function photoBlock(listing, opts = {}) {
-    const { w = 400, h = 300, tall = false, alt = '' } = opts;
+    const { tall = false, alt = '' } = opts;
     const real = listing && listing.photos && listing.photos.length ? listing.photos[0] : null;
-    const src = real || photoUrl(listing ? listing.photo_seed : null, w, h);
+    if (!real) {
+      return `<div class="photo-wrap brand${tall ? ' tall' : ''}">${brandMarkHtml()}</div>`;
+    }
     return `
       <div class="photo-wrap${tall ? ' tall' : ''}">
         <span>💈</span>
-        <img src="${src}" alt="${escapeHtml(alt)}" loading="lazy" onerror="this.remove()" />
+        <img src="${real}" alt="${escapeHtml(alt)}" loading="lazy" onerror="this.remove()" />
       </div>
     `;
   }
@@ -359,8 +363,8 @@ const App = (() => {
     } else {
       mediaHtml = `
         <div class="hero-placeholder">
-          <span>💈</span>
-          <img src="${photoUrl(l.photo_seed, 900, 500)}" alt="${escapeHtml(l.title)}" onerror="this.remove()" />
+          ${brandMarkHtml()}
+          <div class="brand-caption">Photos coming soon</div>
         </div>
       `;
     }
@@ -494,6 +498,13 @@ const App = (() => {
         </div>
       </div>
       <div id="listing-reviews"></div>
+      ${!isOwnerOfThis ? `
+        <div class="mobile-cta-spacer" aria-hidden="true"></div>
+        <div class="mobile-cta-bar">
+          <div class="mobile-cta-price">${money(l.price)}<span class="unit">${unitLabel(l.price_unit)}</span></div>
+          <button class="pill-btn" type="button" onclick="App.openContactModal(${l.id})">Contact Owner</button>
+        </div>
+      ` : ''}
     `;
 
     const area = document.getElementById('request-area');
@@ -667,14 +678,6 @@ const App = (() => {
           <div class="field"><label>Password</label><input type="password" name="password" required minlength="6" /></div>
           <div class="field"><label>Phone (optional)</label><input type="tel" name="phone" /></div>
           <div class="field"><label>Short bio (optional)</label><textarea name="bio" placeholder="${signupRole === 'owner' ? 'Tell barbers about your shop...' : 'Tell shop owners about your experience...'}"></textarea></div>
-          <div id="license-fields" ${signupRole === 'owner' ? 'hidden' : ''}>
-            <p class="card-meta" style="margin:0 0 8px;">Optional for now — having it on file is a first step toward a trust badge later.</p>
-            <div class="row-2">
-              <div class="field"><label>Barber license #</label><input type="text" name="license_number" /></div>
-              <div class="field"><label>License state</label><input type="text" name="license_state" maxlength="2" placeholder="TX" /></div>
-            </div>
-            <div class="field"><label>License expiration</label><input type="date" name="license_expiration" /></div>
-          </div>
           <button class="pill-btn" type="submit">Create account</button>
           <div id="auth-msg"></div>
         </form>
@@ -687,8 +690,6 @@ const App = (() => {
     signupRole = role;
     document.getElementById('role-barber').classList.toggle('active', role === 'barber');
     document.getElementById('role-owner').classList.toggle('active', role === 'owner');
-    const licenseFields = document.getElementById('license-fields');
-    if (licenseFields) licenseFields.hidden = role !== 'barber';
     const bioField = document.querySelector('#app textarea[name="bio"]');
     if (bioField) bioField.placeholder = role === 'owner' ? 'Tell barbers about your shop...' : 'Tell shop owners about your experience...';
   }
@@ -703,8 +704,6 @@ const App = (() => {
         body: {
           name: f.get('name'), email: f.get('email'), password: f.get('password'),
           role: signupRole, phone: f.get('phone'), bio: f.get('bio'),
-          license_number: f.get('license_number') || '', license_state: f.get('license_state') || '',
-          license_expiration: f.get('license_expiration') || '',
         },
       });
       state.token = data.token;
@@ -753,6 +752,7 @@ const App = (() => {
     postListingState = { step: 0, files: [], existingPhotos: (e.photos || []).slice() };
 
     $app().innerHTML = `
+      <div class="form-page">
       <h1>${editId ? 'Edit listing' : 'Post a new listing'}</h1>
       <div class="step-progress">
         ${POST_STEPS.map((s, i) => `
@@ -828,6 +828,7 @@ const App = (() => {
         </div>
         <div id="listing-msg"></div>
       </form>
+      </div>
     `;
     renderExistingPhotoThumbs();
     setupDropzone();
