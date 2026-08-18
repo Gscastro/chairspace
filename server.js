@@ -1084,6 +1084,7 @@ function renderListingPage(req, listing) {
 ${heroImg ? `<meta property="og:image" content="${escapeHtml(heroImg)}" />\n` : ''}<meta property="og:url" content="${url}" />
 <script type="application/ld+json">${JSON.stringify(jsonLd)}</script>
 <link rel="stylesheet" href="/style.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
 </head>
 <body>
   <header class="site">
@@ -1118,6 +1119,11 @@ ${heroImg ? `<meta property="og:image" content="${escapeHtml(heroImg)}" />\n` : 
     </div>
   </footer>
   <div id="modal-root"></div>
+  <!-- Leaflet must be loaded here too, not just in index.html: this
+       server-rendered page is what a visitor gets when they open a listing
+       URL directly (a shared link, a refresh, or right after publishing).
+       Without it the map script silently bails and leaves an empty gray box. -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="/app.js"></script>
 </body>
 </html>`;
