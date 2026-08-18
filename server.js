@@ -1,11 +1,13 @@
-// server.js — ChairSpace API + static server. Pure Node built-ins, no npm deps.
+// server.js — ChairSpace API + static server. Node built-ins only, plus a
+// Postgres client (pg) for the database and plain HTTPS calls for Resend,
+// Nominatim, and Cloudinary — no other npm dependencies.
 
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { db, hashPassword } = require('./db');
+const { db, hashPassword, ready } = require('./db');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -69,29 +71,29 @@ function sendEmail({ to, subject, html }) {
 function geocodeListing(listingId, address, city, state, zip) {
   const query = [address, city, state, zip].filter(Boolean).join(', ');
   if (!query) return;
-  const path = `/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
+  const reqPath = `/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
   const req = https.request(
     {
       hostname: 'nominatim.openstreetmap.org',
-      path,
+      path: reqPath,
       method: 'GET',
       headers: { 'User-Agent': 'ChairSpace-Prototype/1.0 (contact: chairspace app)' },
     },
     (res) => {
       let body = '';
       res.on('data', (c) => (body += c));
-      res.on('end', () => {
+      res.on('end', async () => {
         try {
           const results = JSON.parse(body);
           if (Array.isArray(results) && results[0]) {
             const lat = Number(results[0].lat);
             const lon = Number(results[0].lon);
             if (Number.isFinite(lat) && Number.isFinite(lon)) {
-              db.prepare('UPDATE listings SET lat = ?, lon = ? WHERE id = ?').run(lat, lon, listingId);
+              await db.prepare('UPDATE listings SET lat = ?, lon = ? WHERE id = ?').run(lat, lon, listingId);
             }
           }
         } catch (e) {
-          console.error('[geocode parse error]', e.message);
+          console.error('[geocode error]', e.message);
         }
       });
     }
@@ -104,14 +106,14 @@ function geocodeListing(listingId, address, city, state, zip) {
 // Event-driven rather than polled: Render's free tier spins the server down
 // on inactivity, so a cron-style poller wouldn't reliably run anyway. Instead
 // we check saved searches once, right when a new listing is created.
-function notifySavedSearchMatches(listing) {
-  const searches = db.prepare('SELECT * FROM saved_searches').all();
+async function notifySavedSearchMatches(listing) {
+  const searches = await db.prepare('SELECT * FROM saved_searches').all();
   for (const s of searches) {
     if (s.city && !listing.city.toLowerCase().includes(String(s.city).toLowerCase())) continue;
     if (s.chair_type && s.chair_type !== listing.chair_type) continue;
     if (s.price_unit && s.price_unit !== listing.price_unit) continue;
     if (s.max_price && Number(listing.price) > Number(s.max_price)) continue;
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(s.user_id);
+    const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(s.user_id);
     if (!user) continue;
     sendEmail({
       to: user.email,
@@ -121,6 +123,81 @@ function notifySavedSearchMatches(listing) {
         <p><a href="${PUBLIC_URL}/listing/${listing.id}">View it on ChairSpace</a></p>`,
     });
   }
+}
+
+// ---------- photo storage (Cloudinary) ----------
+// Uploaded photos used to be written to local disk, which — like the old
+// SQLite database file — got wiped on every Render restart. Cloudinary's
+// free tier gives real, persistent photo storage with no server disk
+// involved. This uses a *signed* upload (the signature is generated here
+// with Node's built-in crypto module, no SDK needed) rather than an
+// unsigned upload preset, so the only setup is pasting credentials into
+// Render — nothing to configure in Cloudinary's own dashboard first.
+function getCloudinaryConfig() {
+  const url = process.env.CLOUDINARY_URL;
+  if (url) {
+    const m = url.match(/^cloudinary:\/\/([^:]+):([^@]+)@(.+)$/);
+    if (m) return { apiKey: m[1], apiSecret: m[2], cloudName: m[3] };
+  }
+  const { CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET } = process.env;
+  if (CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
+    return { apiKey: CLOUDINARY_API_KEY, apiSecret: CLOUDINARY_API_SECRET, cloudName: CLOUDINARY_CLOUD_NAME };
+  }
+  return null;
+}
+
+function uploadToCloudinary(buffer, mimeType) {
+  const config = getCloudinaryConfig();
+  if (!config) return Promise.reject(new Error("Photo uploads aren't set up yet"));
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const folder = 'chairspace';
+  // Cloudinary signatures cover every param except file/api_key/signature
+  // itself, sorted alphabetically by key.
+  const toSign = `folder=${folder}&timestamp=${timestamp}`;
+  const signature = crypto.createHash('sha1').update(toSign + config.apiSecret).digest('hex');
+
+  const dataUri = `data:${mimeType};base64,${buffer.toString('base64')}`;
+  const body = new URLSearchParams({
+    file: dataUri,
+    api_key: config.apiKey,
+    timestamp: String(timestamp),
+    folder,
+    signature,
+  }).toString();
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        hostname: 'api.cloudinary.com',
+        path: `/v1_1/${config.cloudName}/image/upload`,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        let raw = '';
+        res.on('data', (c) => (raw += c));
+        res.on('end', () => {
+          let json;
+          try {
+            json = JSON.parse(raw);
+          } catch (e) {
+            return reject(new Error('Cloudinary returned an unexpected response'));
+          }
+          if (res.statusCode >= 400) {
+            return reject(new Error((json.error && json.error.message) || `Cloudinary upload failed (${res.statusCode})`));
+          }
+          resolve(json.secure_url);
+        });
+      }
+    );
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
 }
 
 // ---------- helpers ----------
@@ -224,15 +301,14 @@ function parseMultipart(buffer, boundary) {
 const ALLOWED_IMAGE_TYPES = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif' };
 const MAX_PHOTOS = 5;
 const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
-const UPLOADS_DIR = path.join(PUBLIC_DIR, 'uploads', 'listings');
 
-function getSessionUser(req) {
+async function getSessionUser(req) {
   const auth = req.headers['authorization'] || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
   if (!token) return null;
-  const row = db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
+  const row = await db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
   if (!row) return null;
-  const user = db.prepare('SELECT id, name, email, role, phone, bio, license_number, license_state, license_expiration, created_at FROM users WHERE id = ?').get(row.user_id);
+  const user = await db.prepare('SELECT id, name, email, role, phone, bio, license_number, license_state, license_expiration, created_at FROM users WHERE id = ?').get(row.user_id);
   return user || null;
 }
 
@@ -287,7 +363,7 @@ route('POST', '/api/signup', async (req, res) => {
   if (!['barber', 'owner'].includes(role)) {
     return send(res, 400, { error: "role must be 'barber' or 'owner'" });
   }
-  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email.toLowerCase().trim());
+  const existing = await db.prepare('SELECT id FROM users WHERE email = ?').get(email.toLowerCase().trim());
   if (existing) return send(res, 409, { error: 'An account with that email already exists' });
 
   const salt = crypto.randomBytes(16).toString('hex');
@@ -297,16 +373,17 @@ route('POST', '/api/signup', async (req, res) => {
   const lic = role === 'barber' ? (license_number || null) : null;
   const licState = role === 'barber' ? (license_state || null) : null;
   const licExp = role === 'barber' ? (license_expiration || null) : null;
-  const info = db.prepare(`
+  const info = await db.prepare(`
     INSERT INTO users (name, email, password_hash, salt, role, phone, bio, license_number, license_state, license_expiration, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    RETURNING id
   `).run(name, email.toLowerCase().trim(), password_hash, salt, role, phone || null, bio || null, lic, licState, licExp, new Date().toISOString());
 
   const userId = Number(info.lastInsertRowid);
   const token = crypto.randomBytes(24).toString('hex');
-  db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)').run(token, userId, new Date().toISOString());
+  await db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)').run(token, userId, new Date().toISOString());
 
-  const user = db.prepare('SELECT id, name, email, role, phone, bio, license_number, license_state, license_expiration, created_at FROM users WHERE id = ?').get(userId);
+  const user = await db.prepare('SELECT id, name, email, role, phone, bio, license_number, license_state, license_expiration, created_at FROM users WHERE id = ?').get(userId);
   send(res, 201, { token, user });
 });
 
@@ -315,14 +392,14 @@ route('POST', '/api/login', async (req, res) => {
   const { email, password } = body;
   if (!email || !password) return send(res, 400, { error: 'email and password are required' });
 
-  const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email.toLowerCase().trim());
+  const row = await db.prepare('SELECT * FROM users WHERE email = ?').get(email.toLowerCase().trim());
   if (!row) return send(res, 401, { error: 'Invalid email or password' });
 
   const hash = hashPassword(password, row.salt);
   if (hash !== row.password_hash) return send(res, 401, { error: 'Invalid email or password' });
 
   const token = crypto.randomBytes(24).toString('hex');
-  db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)').run(token, row.id, new Date().toISOString());
+  await db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)').run(token, row.id, new Date().toISOString());
 
   const user = {
     id: row.id, name: row.name, email: row.email, role: row.role, phone: row.phone, bio: row.bio,
@@ -335,12 +412,12 @@ route('POST', '/api/login', async (req, res) => {
 route('POST', '/api/logout', async (req, res) => {
   const auth = req.headers['authorization'] || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-  if (token) db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+  if (token) await db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
   send(res, 200, { ok: true });
 });
 
 route('GET', '/api/me', async (req, res) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
   send(res, 200, { user });
 });
@@ -372,27 +449,27 @@ route('GET', '/api/listings', async (req, res, params, query) => {
     args.push(today);
   }
   sql += ' ORDER BY created_at DESC';
-  const rows = db.prepare(sql).all(...args);
+  const rows = await db.prepare(sql).all(...args);
   const listings = rows.map(publicListing);
   // attach owner name for display
   for (const l of listings) {
-    const owner = db.prepare('SELECT name FROM users WHERE id = ?').get(l.owner_id);
+    const owner = await db.prepare('SELECT name FROM users WHERE id = ?').get(l.owner_id);
     l.owner_name = owner ? owner.name : 'Unknown';
   }
   send(res, 200, { listings });
 });
 
 route('GET', '/api/listings/:id', async (req, res, params) => {
-  const row = db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id);
+  const row = await db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id);
   if (!row) return send(res, 404, { error: 'Listing not found' });
   const listing = publicListing(row);
-  const owner = db.prepare('SELECT id, name, email, phone, bio FROM users WHERE id = ?').get(row.owner_id);
+  const owner = await db.prepare('SELECT id, name, email, phone, bio FROM users WHERE id = ?').get(row.owner_id);
   listing.owner = owner;
   send(res, 200, { listing });
 });
 
 route('POST', '/api/listings', async (req, res) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
   if (user.role !== 'owner') return send(res, 403, { error: 'Only space owners can post listings' });
 
@@ -406,23 +483,24 @@ route('POST', '/api/listings', async (req, res) => {
   }
   const policy = CANCELLATION_POLICIES.includes(cancellation_policy) ? cancellation_policy : 'standard';
   const photo_seed = 'l' + Date.now() + Math.floor(Math.random() * 1000);
-  const info = db.prepare(`
+  const info = await db.prepare(`
     INSERT INTO listings (owner_id, title, description, address, city, state, zip, price, price_unit, chair_type, photo_seed, available_from, total_chairs, cancellation_policy, active, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+    RETURNING id
   `).run(user.id, title, description || '', address || '', city, state, zip || '', Number(price), price_unit, chair_type, photo_seed, available_from || null, total_chairs ? Number(total_chairs) : null, policy, new Date().toISOString());
 
   const listingId = Number(info.lastInsertRowid);
-  const listing = publicListing(db.prepare('SELECT * FROM listings WHERE id = ?').get(listingId));
+  const listing = publicListing(await db.prepare('SELECT * FROM listings WHERE id = ?').get(listingId));
   send(res, 201, { listing });
 
   geocodeListing(listingId, address, city, state, zip);
-  notifySavedSearchMatches(listing);
+  notifySavedSearchMatches(listing).catch((e) => console.error('[saved search notify error]', e.message));
 });
 
 route('PATCH', '/api/listings/:id', async (req, res, params) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
-  const row = db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id);
+  const row = await db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id);
   if (!row) return send(res, 404, { error: 'Listing not found' });
   if (row.owner_id !== user.id) return send(res, 403, { error: 'Not your listing' });
 
@@ -441,8 +519,8 @@ route('PATCH', '/api/listings/:id', async (req, res, params) => {
   }
   if (fields.length === 0) return send(res, 400, { error: 'No fields to update' });
   args.push(params.id);
-  db.prepare(`UPDATE listings SET ${fields.join(', ')} WHERE id = ?`).run(...args);
-  const updated = publicListing(db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id));
+  await db.prepare(`UPDATE listings SET ${fields.join(', ')} WHERE id = ?`).run(...args);
+  const updated = publicListing(await db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id));
   send(res, 200, { listing: updated });
 
   const addressChanged = ['address', 'city', 'state', 'zip'].some((k) => body[k] !== undefined);
@@ -450,11 +528,15 @@ route('PATCH', '/api/listings/:id', async (req, res, params) => {
 });
 
 route('POST', '/api/listings/:id/photos', async (req, res, params) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
-  const row = db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id);
+  const row = await db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id);
   if (!row) return send(res, 404, { error: 'Listing not found' });
   if (row.owner_id !== user.id) return send(res, 403, { error: 'Not your listing' });
+
+  if (!getCloudinaryConfig()) {
+    return send(res, 503, { error: "Photo uploads aren't set up yet — add your Cloudinary credentials in Render's Environment settings." });
+  }
 
   const contentType = req.headers['content-type'] || '';
   const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
@@ -490,37 +572,33 @@ route('POST', '/api/listings/:id/photos', async (req, res, params) => {
     return send(res, 400, { error: `A listing can have at most ${MAX_PHOTOS} photos total` });
   }
 
-  const listingDir = path.join(UPLOADS_DIR, String(params.id));
-  fs.mkdirSync(listingDir, { recursive: true });
-
-  const savedPaths = [];
-  for (const f of imageFiles) {
-    const ext = ALLOWED_IMAGE_TYPES[f.contentType];
-    const fname = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${ext}`;
-    fs.writeFileSync(path.join(listingDir, fname), f.data);
-    savedPaths.push(`/uploads/listings/${params.id}/${fname}`);
+  let uploadedUrls;
+  try {
+    uploadedUrls = await Promise.all(imageFiles.map((f) => uploadToCloudinary(f.data, f.contentType)));
+  } catch (e) {
+    return send(res, 502, { error: `Photo upload failed: ${e.message}` });
   }
 
-  const allPhotos = existingPhotos.concat(savedPaths);
-  db.prepare('UPDATE listings SET photos = ? WHERE id = ?').run(JSON.stringify(allPhotos), params.id);
-  const updated = publicListing(db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id));
+  const allPhotos = existingPhotos.concat(uploadedUrls);
+  await db.prepare('UPDATE listings SET photos = ? WHERE id = ?').run(JSON.stringify(allPhotos), params.id);
+  const updated = publicListing(await db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id));
   send(res, 200, { listing: updated });
 });
 
 route('GET', '/api/my-listings', async (req, res) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
   if (user.role !== 'owner') return send(res, 403, { error: 'Only space owners have listings' });
-  const rows = db.prepare('SELECT * FROM listings WHERE owner_id = ? ORDER BY created_at DESC').all(user.id);
+  const rows = await db.prepare('SELECT * FROM listings WHERE owner_id = ? ORDER BY created_at DESC').all(user.id);
   send(res, 200, { listings: rows.map(publicListing) });
 });
 
 // --- Favorites (barbers bookmarking listings) ---
 
 route('GET', '/api/favorites', async (req, res) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
-  const rows = db.prepare(`
+  const rows = await db.prepare(`
     SELECT l.* FROM favorites f
     JOIN listings l ON f.listing_id = l.id
     WHERE f.user_id = ?
@@ -530,40 +608,42 @@ route('GET', '/api/favorites', async (req, res) => {
 });
 
 route('GET', '/api/favorites/ids', async (req, res) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
-  const rows = db.prepare('SELECT listing_id FROM favorites WHERE user_id = ?').all(user.id);
+  const rows = await db.prepare('SELECT listing_id FROM favorites WHERE user_id = ?').all(user.id);
   send(res, 200, { listing_ids: rows.map((r) => r.listing_id) });
 });
 
 route('POST', '/api/favorites', async (req, res) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
   const body = await readBody(req);
   const listingId = Number(body.listing_id);
   if (!listingId) return send(res, 400, { error: 'listing_id is required' });
-  const listing = db.prepare('SELECT id FROM listings WHERE id = ?').get(listingId);
+  const listing = await db.prepare('SELECT id FROM listings WHERE id = ?').get(listingId);
   if (!listing) return send(res, 404, { error: 'Listing not found' });
   try {
-    db.prepare('INSERT INTO favorites (user_id, listing_id, created_at) VALUES (?, ?, ?)')
+    await db.prepare('INSERT INTO favorites (user_id, listing_id, created_at) VALUES (?, ?, ?)')
       .run(user.id, listingId, new Date().toISOString());
   } catch (e) {
-    // UNIQUE constraint — already favorited, treat as a no-op success
+    // 23505 = Postgres unique_violation — already favorited, treat as a
+    // no-op success. Anything else is a real error and should surface.
+    if (e.code !== '23505') throw e;
   }
   send(res, 201, { ok: true });
 });
 
 route('DELETE', '/api/favorites/:listingId', async (req, res, params) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
-  db.prepare('DELETE FROM favorites WHERE user_id = ? AND listing_id = ?').run(user.id, params.listingId);
+  await db.prepare('DELETE FROM favorites WHERE user_id = ? AND listing_id = ?').run(user.id, params.listingId);
   send(res, 200, { ok: true });
 });
 
 // --- Inquiries (no-login "Contact Owner" leads) ---
 
 route('POST', '/api/listings/:id/inquiries', async (req, res, params) => {
-  const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id);
+  const listing = await db.prepare('SELECT * FROM listings WHERE id = ?').get(params.id);
   if (!listing) return send(res, 404, { error: 'Listing not found' });
 
   const body = await readBody(req);
@@ -573,15 +653,16 @@ route('POST', '/api/listings/:id/inquiries', async (req, res, params) => {
     return send(res, 400, { error: 'A valid email is required' });
   }
 
-  const info = db.prepare(`
+  const info = await db.prepare(`
     INSERT INTO inquiries (listing_id, name, email, phone, social, message, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
+    RETURNING id
   `).run(params.id, name.trim(), email.trim(), phone || '', social || '', message || '', new Date().toISOString());
 
-  const created = db.prepare('SELECT * FROM inquiries WHERE id = ?').get(Number(info.lastInsertRowid));
+  const created = await db.prepare('SELECT * FROM inquiries WHERE id = ?').get(Number(info.lastInsertRowid));
   send(res, 201, { inquiry: created });
 
-  const owner = db.prepare('SELECT * FROM users WHERE id = ?').get(listing.owner_id);
+  const owner = await db.prepare('SELECT * FROM users WHERE id = ?').get(listing.owner_id);
   if (owner) {
     sendEmail({
       to: owner.email,
@@ -594,19 +675,19 @@ route('POST', '/api/listings/:id/inquiries', async (req, res, params) => {
 });
 
 route('GET', '/api/inquiries/received', async (req, res) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
   if (user.role !== 'owner') return send(res, 403, { error: 'Only space owners receive inquiries' });
 
-  const rows = db.prepare(`
+  const rows = await db.prepare(`
     SELECT i.* FROM inquiries i
     JOIN listings l ON i.listing_id = l.id
     WHERE l.owner_id = ?
     ORDER BY i.created_at DESC
   `).all(user.id);
 
-  const inquiries = rows.map((row) => {
-    const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
+  const inquiries = await Promise.all(rows.map(async (row) => {
+    const listing = await db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
     return {
       id: row.id,
       name: row.name,
@@ -617,38 +698,39 @@ route('GET', '/api/inquiries/received', async (req, res) => {
       created_at: row.created_at,
       listing: listing ? publicListing(listing) : null,
     };
-  });
+  }));
   send(res, 200, { inquiries });
 });
 
 // --- Requests (rental requests) ---
 
 route('POST', '/api/requests', async (req, res) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
   if (user.role !== 'barber') return send(res, 403, { error: 'Only barbers can send rental requests' });
 
   const body = await readBody(req);
   const { listing_id, start_date, end_date, message } = body;
   if (!listing_id) return send(res, 400, { error: 'listing_id is required' });
-  const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(listing_id);
+  const listing = await db.prepare('SELECT * FROM listings WHERE id = ?').get(listing_id);
   if (!listing) return send(res, 404, { error: 'Listing not found' });
   if (listing.owner_id === user.id) return send(res, 400, { error: "You can't request your own listing" });
 
-  const info = db.prepare(`
+  const info = await db.prepare(`
     INSERT INTO requests (listing_id, barber_id, status, start_date, end_date, message, created_at)
     VALUES (?, ?, 'pending', ?, ?, ?, ?)
+    RETURNING id
   `).run(listing_id, user.id, start_date || null, end_date || null, message || '', new Date().toISOString());
 
   const reqId = Number(info.lastInsertRowid);
   if (message) {
-    db.prepare('INSERT INTO messages (request_id, sender_id, body, created_at) VALUES (?, ?, ?, ?)')
+    await db.prepare('INSERT INTO messages (request_id, sender_id, body, created_at) VALUES (?, ?, ?, ?)')
       .run(reqId, user.id, message, new Date().toISOString());
   }
-  const created = db.prepare('SELECT * FROM requests WHERE id = ?').get(reqId);
+  const created = await db.prepare('SELECT * FROM requests WHERE id = ?').get(reqId);
   send(res, 201, { request: created });
 
-  const owner = db.prepare('SELECT * FROM users WHERE id = ?').get(listing.owner_id);
+  const owner = await db.prepare('SELECT * FROM users WHERE id = ?').get(listing.owner_id);
   if (owner) {
     sendEmail({
       to: owner.email,
@@ -660,10 +742,10 @@ route('POST', '/api/requests', async (req, res) => {
   }
 });
 
-function enrichRequest(row) {
-  const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
-  const barber = db.prepare('SELECT id, name, email, phone FROM users WHERE id = ?').get(row.barber_id);
-  const owner = listing ? db.prepare('SELECT id, name, email, phone FROM users WHERE id = ?').get(listing.owner_id) : null;
+async function enrichRequest(row) {
+  const listing = await db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
+  const barber = await db.prepare('SELECT id, name, email, phone FROM users WHERE id = ?').get(row.barber_id);
+  const owner = listing ? await db.prepare('SELECT id, name, email, phone FROM users WHERE id = ?').get(listing.owner_id) : null;
   return {
     id: row.id,
     status: row.status,
@@ -678,31 +760,31 @@ function enrichRequest(row) {
 }
 
 route('GET', '/api/requests/sent', async (req, res) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
-  const rows = db.prepare('SELECT * FROM requests WHERE barber_id = ? ORDER BY created_at DESC').all(user.id);
-  send(res, 200, { requests: rows.map(enrichRequest) });
+  const rows = await db.prepare('SELECT * FROM requests WHERE barber_id = ? ORDER BY created_at DESC').all(user.id);
+  send(res, 200, { requests: await Promise.all(rows.map(enrichRequest)) });
 });
 
 route('GET', '/api/requests/received', async (req, res) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
   if (user.role !== 'owner') return send(res, 403, { error: 'Only space owners receive requests' });
-  const rows = db.prepare(`
+  const rows = await db.prepare(`
     SELECT r.* FROM requests r
     JOIN listings l ON r.listing_id = l.id
     WHERE l.owner_id = ?
     ORDER BY r.created_at DESC
   `).all(user.id);
-  send(res, 200, { requests: rows.map(enrichRequest) });
+  send(res, 200, { requests: await Promise.all(rows.map(enrichRequest)) });
 });
 
 route('PATCH', '/api/requests/:id', async (req, res, params) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
-  const row = db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
+  const row = await db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
   if (!row) return send(res, 404, { error: 'Request not found' });
-  const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
+  const listing = await db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
 
   const body = await readBody(req);
   const { status } = body;
@@ -721,12 +803,12 @@ route('PATCH', '/api/requests/:id', async (req, res, params) => {
     return send(res, 400, { error: 'Invalid status' });
   }
 
-  db.prepare('UPDATE requests SET status = ? WHERE id = ?').run(status, params.id);
-  const updated = db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
-  send(res, 200, { request: enrichRequest(updated) });
+  await db.prepare('UPDATE requests SET status = ? WHERE id = ?').run(status, params.id);
+  const updated = await db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
+  send(res, 200, { request: await enrichRequest(updated) });
 
   if (['approved', 'declined'].includes(status)) {
-    const barber = db.prepare('SELECT * FROM users WHERE id = ?').get(row.barber_id);
+    const barber = await db.prepare('SELECT * FROM users WHERE id = ?').get(row.barber_id);
     if (barber) {
       sendEmail({
         to: barber.email,
@@ -741,43 +823,43 @@ route('PATCH', '/api/requests/:id', async (req, res, params) => {
 // --- Messaging ---
 
 route('GET', '/api/requests/:id/messages', async (req, res, params) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
-  const row = db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
+  const row = await db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
   if (!row) return send(res, 404, { error: 'Request not found' });
-  const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
+  const listing = await db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
   const isParty = row.barber_id === user.id || (listing && listing.owner_id === user.id);
   if (!isParty) return send(res, 403, { error: 'Not part of this conversation' });
 
-  const rows = db.prepare('SELECT * FROM messages WHERE request_id = ? ORDER BY created_at ASC').all(params.id);
-  const messages = rows.map((m) => {
-    const sender = db.prepare('SELECT id, name FROM users WHERE id = ?').get(m.sender_id);
+  const rows = await db.prepare('SELECT * FROM messages WHERE request_id = ? ORDER BY created_at ASC').all(params.id);
+  const messages = await Promise.all(rows.map(async (m) => {
+    const sender = await db.prepare('SELECT id, name FROM users WHERE id = ?').get(m.sender_id);
     return { id: m.id, body: m.body, created_at: m.created_at, sender };
-  });
+  }));
   send(res, 200, { messages });
 });
 
 route('POST', '/api/requests/:id/messages', async (req, res, params) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
-  const row = db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
+  const row = await db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
   if (!row) return send(res, 404, { error: 'Request not found' });
-  const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
+  const listing = await db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
   const isParty = row.barber_id === user.id || (listing && listing.owner_id === user.id);
   if (!isParty) return send(res, 403, { error: 'Not part of this conversation' });
 
   const body = await readBody(req);
   if (!body.body || !body.body.trim()) return send(res, 400, { error: 'Message body is required' });
 
-  const info = db.prepare('INSERT INTO messages (request_id, sender_id, body, created_at) VALUES (?, ?, ?, ?)')
+  const info = await db.prepare('INSERT INTO messages (request_id, sender_id, body, created_at) VALUES (?, ?, ?, ?) RETURNING id')
     .run(params.id, user.id, body.body.trim(), new Date().toISOString());
-  const m = db.prepare('SELECT * FROM messages WHERE id = ?').get(Number(info.lastInsertRowid));
-  const sender = db.prepare('SELECT id, name FROM users WHERE id = ?').get(user.id);
+  const m = await db.prepare('SELECT * FROM messages WHERE id = ?').get(Number(info.lastInsertRowid));
+  const sender = await db.prepare('SELECT id, name FROM users WHERE id = ?').get(user.id);
   send(res, 201, { message: { id: m.id, body: m.body, created_at: m.created_at, sender } });
 
   const otherUserId = row.barber_id === user.id ? (listing ? listing.owner_id : null) : row.barber_id;
   if (otherUserId) {
-    const other = db.prepare('SELECT * FROM users WHERE id = ?').get(otherUserId);
+    const other = await db.prepare('SELECT * FROM users WHERE id = ?').get(otherUserId);
     if (other) {
       sendEmail({
         to: other.email,
@@ -792,14 +874,14 @@ route('POST', '/api/requests/:id/messages', async (req, res, params) => {
 // --- Saved searches (email alert when a new matching listing goes up) ---
 
 route('GET', '/api/saved-searches', async (req, res) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
-  const rows = db.prepare('SELECT * FROM saved_searches WHERE user_id = ? ORDER BY created_at DESC').all(user.id);
+  const rows = await db.prepare('SELECT * FROM saved_searches WHERE user_id = ? ORDER BY created_at DESC').all(user.id);
   send(res, 200, { searches: rows });
 });
 
 route('POST', '/api/saved-searches', async (req, res) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
   if (user.role !== 'barber') return send(res, 403, { error: 'Only barbers can save searches' });
   const body = await readBody(req);
@@ -807,21 +889,22 @@ route('POST', '/api/saved-searches', async (req, res) => {
   if (!city && !chair_type && !price_unit && !max_price) {
     return send(res, 400, { error: 'Add at least one filter to save a search' });
   }
-  const info = db.prepare(`
+  const info = await db.prepare(`
     INSERT INTO saved_searches (user_id, label, city, chair_type, price_unit, max_price, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
+    RETURNING id
   `).run(user.id, label || null, city || null, chair_type || null, price_unit || null, max_price ? Number(max_price) : null, new Date().toISOString());
-  const created = db.prepare('SELECT * FROM saved_searches WHERE id = ?').get(Number(info.lastInsertRowid));
+  const created = await db.prepare('SELECT * FROM saved_searches WHERE id = ?').get(Number(info.lastInsertRowid));
   send(res, 201, { search: created });
 });
 
 route('DELETE', '/api/saved-searches/:id', async (req, res, params) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
-  const row = db.prepare('SELECT * FROM saved_searches WHERE id = ?').get(params.id);
+  const row = await db.prepare('SELECT * FROM saved_searches WHERE id = ?').get(params.id);
   if (!row) return send(res, 404, { error: 'Saved search not found' });
   if (row.user_id !== user.id) return send(res, 403, { error: 'Not your saved search' });
-  db.prepare('DELETE FROM saved_searches WHERE id = ?').run(params.id);
+  await db.prepare('DELETE FROM saved_searches WHERE id = ?').run(params.id);
   send(res, 200, { ok: true });
 });
 
@@ -832,17 +915,19 @@ route('DELETE', '/api/saved-searches/:id', async (req, res, params) => {
 // "rental completed" step yet, an approved request is used as the proxy for
 // "the rental happened" — either party can review once status = approved.
 
-function reviewsVisibleCount(requestId) {
-  const { count } = db.prepare('SELECT COUNT(*) as count FROM reviews WHERE request_id = ?').get(requestId);
+async function reviewsVisibleCount(requestId) {
+  // COUNT(*) comes back from Postgres as a bigint (returned as a string by
+  // the driver) — cast to int so the `=== 2` checks below work as expected.
+  const { count } = await db.prepare('SELECT COUNT(*)::int as count FROM reviews WHERE request_id = ?').get(requestId);
   return count;
 }
 
 route('POST', '/api/requests/:id/reviews', async (req, res, params) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
-  const row = db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
+  const row = await db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
   if (!row) return send(res, 404, { error: 'Request not found' });
-  const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
+  const listing = await db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
   const isOwner = listing && listing.owner_id === user.id;
   const isBarber = row.barber_id === user.id;
   if (!isOwner && !isBarber) return send(res, 403, { error: 'Not part of this rental' });
@@ -852,30 +937,30 @@ route('POST', '/api/requests/:id/reviews', async (req, res, params) => {
   const rating = Number(body.rating);
   if (!rating || rating < 1 || rating > 5) return send(res, 400, { error: 'rating must be between 1 and 5' });
 
-  const existing = db.prepare('SELECT id FROM reviews WHERE request_id = ? AND author_id = ?').get(params.id, user.id);
+  const existing = await db.prepare('SELECT id FROM reviews WHERE request_id = ? AND author_id = ?').get(params.id, user.id);
   if (existing) return send(res, 409, { error: "You've already reviewed this rental" });
 
   const target_type = isBarber ? 'listing' : 'barber';
   const target_id = isBarber ? listing.id : row.barber_id;
 
-  db.prepare(`
+  await db.prepare(`
     INSERT INTO reviews (request_id, listing_id, author_id, target_type, target_id, rating, comment, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(params.id, listing.id, user.id, target_type, target_id, rating, (body.comment || '').trim(), new Date().toISOString());
 
-  send(res, 201, { ok: true, bothSubmitted: reviewsVisibleCount(params.id) === 2 });
+  send(res, 201, { ok: true, bothSubmitted: (await reviewsVisibleCount(params.id)) === 2 });
 });
 
 route('GET', '/api/requests/:id/reviews', async (req, res, params) => {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
-  const row = db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
+  const row = await db.prepare('SELECT * FROM requests WHERE id = ?').get(params.id);
   if (!row) return send(res, 404, { error: 'Request not found' });
-  const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
+  const listing = await db.prepare('SELECT * FROM listings WHERE id = ?').get(row.listing_id);
   const isParty = row.barber_id === user.id || (listing && listing.owner_id === user.id);
   if (!isParty) return send(res, 403, { error: 'Not part of this rental' });
 
-  const rows = db.prepare('SELECT * FROM reviews WHERE request_id = ?').all(params.id);
+  const rows = await db.prepare('SELECT * FROM reviews WHERE request_id = ?').all(params.id);
   const mine = rows.find((r) => r.author_id === user.id) || null;
   const bothSubmitted = rows.length === 2;
   const other = bothSubmitted ? rows.find((r) => r.author_id !== user.id) : null;
@@ -888,17 +973,18 @@ route('GET', '/api/requests/:id/reviews', async (req, res, params) => {
 });
 
 route('GET', '/api/listings/:id/reviews', async (req, res, params) => {
-  const rows = db.prepare(`
+  const rows = await db.prepare(`
     SELECT r.* FROM reviews r
     WHERE r.target_type = 'listing' AND r.target_id = ?
   `).all(params.id);
   // Only reveal reviews whose counterpart (the barber-targeted review for the
   // same request) has also been submitted — same blind logic as above.
-  const visible = rows.filter((r) => reviewsVisibleCount(r.request_id) === 2);
-  const enriched = visible.map((r) => {
-    const author = db.prepare('SELECT id, name FROM users WHERE id = ?').get(r.author_id);
+  const counts = await Promise.all(rows.map((r) => reviewsVisibleCount(r.request_id)));
+  const visible = rows.filter((r, i) => counts[i] === 2);
+  const enriched = await Promise.all(visible.map(async (r) => {
+    const author = await db.prepare('SELECT id, name FROM users WHERE id = ?').get(r.author_id);
     return { id: r.id, rating: r.rating, comment: r.comment, created_at: r.created_at, author: author ? { id: author.id, name: author.name } : null };
-  });
+  }));
   const avg = enriched.length ? enriched.reduce((s, r) => s + r.rating, 0) / enriched.length : null;
   send(res, 200, { reviews: enriched, average: avg, count: enriched.length });
 });
@@ -917,8 +1003,6 @@ const MIME = {
   '.webp': 'image/webp',
   '.gif': 'image/gif',
 };
-
-fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 function serveStatic(req, res, pathname) {
   let filePath = path.join(PUBLIC_DIR, pathname === '/' ? 'index.html' : pathname);
@@ -939,10 +1023,6 @@ function serveStatic(req, res, pathname) {
       });
       return;
     }
-    // Uploaded photos have unique, never-reused filenames, so they're safe to
-    // cache "forever". CSS/JS/HTML aren't filename-versioned, so we always
-    // revalidate (ETag) rather than risk serving a stale asset after a deploy.
-    const isUpload = pathname.startsWith('/uploads/');
     const etag = `"${stat.size}-${Math.round(stat.mtimeMs)}"`;
     if (req.headers['if-none-match'] === etag) {
       res.writeHead(304, { ETag: etag });
@@ -957,7 +1037,7 @@ function serveStatic(req, res, pathname) {
       res.writeHead(200, {
         'Content-Type': MIME[ext] || 'application/octet-stream',
         ETag: etag,
-        'Cache-Control': isUpload ? 'public, max-age=31536000, immutable' : 'no-cache',
+        'Cache-Control': 'no-cache',
       });
       res.end(data);
     });
@@ -1043,10 +1123,10 @@ ${heroImg ? `<meta property="og:image" content="${escapeHtml(heroImg)}" />\n` : 
 </html>`;
 }
 
-function buildSitemap(req) {
+async function buildSitemap(req) {
   const host = req.headers.host || 'chairspace.onrender.com';
   const base = `https://${host}`;
-  const rows = db.prepare('SELECT id, created_at FROM listings WHERE active = 1').all();
+  const rows = await db.prepare('SELECT id, created_at FROM listings WHERE active = 1').all();
   let xml = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n';
   xml += `  <url>\n    <loc>${base}/</loc>\n  </url>\n`;
   for (const r of rows) {
@@ -1073,7 +1153,7 @@ const server = http.createServer(async (req, res) => {
   if (!pathname.startsWith('/api/')) {
     if (req.method === 'GET' && pathname === '/sitemap.xml') {
       res.writeHead(200, { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
-      return res.end(buildSitemap(req));
+      return res.end(await buildSitemap(req));
     }
     if (req.method === 'GET' && pathname === '/robots.txt') {
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
@@ -1081,7 +1161,7 @@ const server = http.createServer(async (req, res) => {
     }
     const listingMatch = pathname.match(/^\/listing\/(\d+)\/?$/);
     if (req.method === 'GET' && listingMatch) {
-      const row = db.prepare('SELECT * FROM listings WHERE id = ?').get(listingMatch[1]);
+      const row = await db.prepare('SELECT * FROM listings WHERE id = ?').get(listingMatch[1]);
       if (!row) {
         res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
         return res.end('<!DOCTYPE html><title>Not found — ChairSpace</title><h1>Listing not found</h1><p><a href="/">Back to ChairSpace</a></p>');
@@ -1110,6 +1190,15 @@ const server = http.createServer(async (req, res) => {
   send(res, 404, { error: 'Not found' });
 });
 
-server.listen(PORT, () => {
-  console.log(`ChairSpace running at http://localhost:${PORT}`);
-});
+// Wait for the database (schema + migrations + sample-data seed) to be ready
+// before accepting any traffic, so no request can race the initial setup.
+ready
+  .then(() => {
+    server.listen(PORT, () => {
+      console.log(`ChairSpace running at http://localhost:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to initialize the database:', err.message);
+    process.exit(1);
+  });

@@ -9,8 +9,7 @@ meant to be clicked through, tested, and used as the starting point for a real b
 ## Deploying this to a live URL (Render)
 
 This repo is ready to deploy on [Render](https://render.com) as a Node web service — it
-includes a `render.yaml` blueprint and a `.node-version` file so Render picks Node 22+
-(required for the built-in SQLite support).
+includes a `render.yaml` blueprint and a `.node-version` file so Render picks Node 22+.
 
 **1. Push this code to a new GitHub repository** (from a terminal, in this folder):
 
@@ -30,11 +29,11 @@ git push -u origin main
 just pushed. Render should auto-detect the `render.yaml` blueprint (Node, no build step,
 start command `node server.js`). Otherwise set those manually. Deploy.
 
-**Important caveat:** Render's free tier doesn't support a persistent disk, so the SQLite
-database resets on every redeploy (fine for a demo people are trying out, not fine for
-real user data). `render.yaml` has commented-out instructions for adding a persistent disk
-once you're ready to upgrade to a paid instance — or plan to migrate to a hosted Postgres
-database for a real launch.
+**Before your first deploy (or the app won't start):** ChairSpace now stores its data in a
+real Postgres database and uploaded photos in Cloudinary, both free, so nothing gets wiped
+on redeploy or when Render's free tier spins the service down from inactivity. You need to
+set a `DATABASE_URL` environment variable before the app will boot at all — see "Persistent
+storage setup (Neon + Cloudinary)" below for exact steps.
 
 ## What's included
 
@@ -45,6 +44,10 @@ database for a real launch.
 - Real email notifications (via [Resend](https://resend.com)) on new rental requests, new
   messages, request approve/decline, and new Contact Owner inquiries — see "Email
   notifications setup" below
+- **Persistent storage** — accounts, listings, favorites, reviews, saved searches, and uploaded
+  photos are all stored in a real Postgres database (via [Neon](https://neon.tech)) and
+  [Cloudinary](https://cloudinary.com), both free, so nothing gets wiped when Render redeploys
+  or spins the service down from inactivity — see "Persistent storage setup" below
 - Uploaded photos are automatically resized/compressed in the browser before upload (down to
   1600px max dimension, ~JPEG quality 82%) so a multi-MB phone photo doesn't become a multi-MB
   page load, and static assets/uploaded photos are served with proper cache headers
@@ -79,7 +82,8 @@ database for a real launch.
   theirs, so no one holds back an honest review out of fear of retaliation. Listing pages
   show the average rating and review list once reviews exist.
 - **A map on every listing page** — addresses are geocoded automatically (free, via
-  OpenStreetMap's Nominatim service, no API key) and shown as an embedded OpenStreetMap
+  OpenStreetMap's Nominatim service, no API key) and shown on a clean, branded map (Leaflet +
+  CARTO's free basemap)
 - **Cancellation policy selector** (Flexible / Standard / Strict) when posting a listing,
   shown to barbers on the listing page before they request it
 
@@ -105,28 +109,71 @@ To turn emails on:
 5. Redeploy (or just wait for the next natural redeploy) — no code changes needed, the app
    picks up the environment variable automatically.
 
+## Persistent storage setup (Neon + Cloudinary)
+
+Unlike everything else in this README, this part is **required** — the app won't start
+without a database connected, and photo uploads won't work without Cloudinary connected
+(everything else keeps working fine if Cloudinary isn't set up yet, it just returns a clear
+error if someone tries to upload a photo).
+
+**1. Create a free Postgres database at [neon.tech](https://neon.tech).** Sign up, create a
+new project (any name/region is fine — pick a region close to where Render will run, e.g. US
+East). Once it's created, Neon shows you a **connection string** that looks like
+`postgresql://user:password@host/dbname?sslmode=require`.
+
+**2. Add it to Render:** open your service in the Render dashboard → **Environment**, and add
+a variable named `DATABASE_URL` with that connection string as the value. (Enter this
+directly in Render's dashboard — don't paste database credentials into chat with an AI
+assistant, including this one.)
+
+**3. Create a free Cloudinary account at [cloudinary.com](https://cloudinary.com).** Sign up,
+then go to your **Dashboard** — it shows a "Product Environment Credentials" panel with your
+Cloud name, API Key, and API Secret, plus a single combined value called `CLOUDINARY_URL`
+(looks like `cloudinary://<api_key>:<api_secret>@<cloud_name>`).
+
+**4. Add it to Render:** back in your service's **Environment** tab, add one more variable —
+either:
+   - `CLOUDINARY_URL` set to that combined value (simplest, one variable), **or**
+   - three separate variables `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and
+     `CLOUDINARY_API_SECRET` if you'd rather keep them apart.
+
+   You only need one of those two options, not both.
+
+**5. Deploy (or redeploy).** The very first time it starts up with `DATABASE_URL` set, the app
+creates all its tables automatically and fills them with the same sample listings/accounts it
+always has — no manual migration step. From then on, every account, listing, favorite, review,
+saved search, and uploaded photo persists across redeploys and inactivity spin-downs.
+
+If you skip this setup, the app will fail to start (check the Render logs — it prints a clear
+message asking for `DATABASE_URL`). Photo uploads specifically also check for Cloudinary and
+return a plain-English error ("Photo uploads aren't set up yet...") instead of crashing if
+those variables are missing.
+
 ## Map setup
 
 Nothing to configure — listing addresses are geocoded automatically via
 [OpenStreetMap's Nominatim](https://nominatim.org/) (free, no API key, no account) the moment
-a listing is created or its address is edited, and the map on the listing page is a free
-embedded OpenStreetMap. If a lookup ever fails (e.g. an address that can't be found), the
-listing just doesn't show a map — it never blocks posting or editing.
+a listing is created or its address is edited, and shown on the listing page using
+[Leaflet](https://leafletjs.com/) with a free basemap from [CARTO](https://carto.com/) (no API
+key either). If a lookup ever fails (e.g. an address that can't be found), the listing just
+doesn't show a map — it never blocks posting or editing.
 
 ## How to run it
 
-You need [Node.js](https://nodejs.org) **version 22.5 or newer** (it uses Node's new built-in
-SQLite support, so there's nothing else to install — no `npm install` needed).
+You need [Node.js](https://nodejs.org) **version 22.5 or newer**, plus a Postgres database to
+point it at (see "Persistent storage setup" above — a free Neon database works fine for local
+running too).
 
 ```bash
-node server.js
+npm install
+DATABASE_URL="postgresql://user:password@host/dbname?sslmode=require" node server.js
 ```
 
 Then open **http://localhost:3000** in your browser.
 
-The first time you start it, it creates `chairspace.db` (a local SQLite file) and fills it with
-sample listings and accounts. To start over with a clean slate, just delete `chairspace.db` (and
-the `-shm`/`-wal` files next to it) and restart the server.
+The first time it starts against a given database, it creates all its tables automatically and
+fills them with sample listings and accounts. To start over with a clean slate, point
+`DATABASE_URL` at a fresh, empty database.
 
 ### Try it with these sample logins
 
@@ -140,27 +187,25 @@ Or just sign up for a new account from the homepage.
 ## How it's built
 
 - **Backend:** plain Node.js (`server.js`), no framework — a small router over Node's built-in
-  `http` module, with Node's built-in `node:sqlite` for storage. No `npm install` step, no
-  external dependencies at all.
+  `http` module. Storage is Postgres via the standard [`pg`](https://node-postgres.com/)
+  package (`db.js`) — the only real dependency in `package.json`.
 - **Frontend:** a single-page app in plain JavaScript (`public/app.js`) — no React/build step,
   just fetch calls to a small JSON API and real-path client-side routing via the History API
   (not hash routing — real URLs like `/listing/5` so listing pages are crawlable/indexable).
   Kept dependency-free on purpose so it's easy for a developer to read end to end and easy to
   run anywhere.
 - **Photos:** owners can upload real photos when posting or editing a listing (handled by a
-  small hand-rolled multipart/form-data parser in `server.js`, no upload library needed); files
-  are saved under `public/uploads/listings/<id>/`. Listings without any uploaded photos fall
-  back to a placeholder image service (picsum.photos) keyed off the listing, with a plain icon
-  shown if that's unreachable, so nothing looks broken either way.
+  small hand-rolled multipart/form-data parser in `server.js`, no upload library needed), then
+  sent straight to Cloudinary rather than saved to local disk, so they persist across
+  redeploys. Listings without any uploaded photos fall back to a placeholder image service
+  (picsum.photos) keyed off the listing, with a plain icon shown if that's unreachable, so
+  nothing looks broken either way.
 
 ## What this is *not* (yet)
 
 This is scoped as a clickable, functioning prototype — good for validating the idea, showing
 people, and gathering feedback. Before this could be a real product, it would still need:
 
-- **Persistent file storage** for uploaded photos — Render's free tier has no persistent disk,
-  so like the SQLite database, uploaded photos are wiped on every redeploy. A real launch would
-  move uploads to something like S3 or Cloudinary.
 - **Payments** — collecting rent/deposits, e.g. via Stripe Connect so money can flow between
   barbers and space owners
 - **Stronger auth** — email verification, password reset, rate limiting on login attempts
@@ -173,15 +218,16 @@ people, and gathering feedback. Before this could be a real product, it would st
   for "the rental happened"
 - **Legal basics** — a real rental agreement template and liability language (a cancellation
   policy selector exists now, but it's just a label, not enforceable terms)
-- **A real production database** (e.g. Postgres) and hosting (e.g. Render, Railway, Fly.io) for
-  a live deployment, plus a domain name
+- **Database backups / scaling** — Neon's free tier is real persistent Postgres and fine for a
+  demo or early launch, but a serious production launch would want a paid tier with automated
+  backups and more headroom, plus a real domain name
 
 ## Project structure
 
 ```
 barber-spot-app/
 ├── server.js          API + static file server
-├── db.js               database schema + sample data seeding
+├── db.js               Postgres schema + sample data seeding
 ├── package.json
 └── public/
     ├── index.html       page shell

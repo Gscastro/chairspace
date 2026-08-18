@@ -3,19 +3,31 @@ services:
     name: chairspace
     runtime: node
     plan: free
-    buildCommand: "echo 'no build step needed'"
+    buildCommand: "npm install"
     startCommand: "node server.js"
     envVars:
       - key: NODE_VERSION
-        value: 22.9.0
-    # NOTE: the free plan does not support a persistent disk, so the SQLite
-    # database (chairspace.db) will reset whenever the service redeploys or
-    # is rebuilt. Fine for demo/testing. For real persistence, upgrade this
-    # service to a paid instance type and add a disk, e.g.:
-    #
-    # disk:
-    #   name: chairspace-data
-    #   mountPath: /opt/render/project/src/data
-    #   sizeGB: 1
-    #
-    # ...and update db.js's DB_PATH to point inside that mounted directory.
+        value: 22.22.2
+      # DATABASE_URL: the connection string for your free Postgres database
+      # (e.g. from neon.tech). `sync: false` means Render won't overwrite it
+      # from this file — set the actual value once in the Render dashboard
+      # under this service's Environment tab.
+      - key: DATABASE_URL
+        sync: false
+      # Cloudinary — used for photo uploads (so uploaded photos survive
+      # redeploys too). Either paste the single CLOUDINARY_URL Cloudinary
+      # gives you on signup, OR fill in the three separate values below.
+      # You only need one of these two approaches, not both.
+      - key: CLOUDINARY_URL
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+    # ChairSpace uses a real Postgres database (via DATABASE_URL above) and
+    # Cloudinary for photo storage, so data and photos persist across redeploys
+    # and free-plan spin-downs — no disk needed. The buildCommand above runs
+    # `npm install` so the `pg` package (the only real dependency) gets
+    # installed on every deploy.
