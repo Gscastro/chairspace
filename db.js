@@ -76,9 +76,6 @@ const SCHEMA_SQL = `
     role TEXT NOT NULL CHECK(role IN ('barber','owner')),
     phone TEXT,
     bio TEXT,
-    license_number TEXT,
-    license_state TEXT,
-    license_expiration TEXT,
     created_at TEXT NOT NULL
   );
 
@@ -178,12 +175,29 @@ const SCHEMA_SQL = `
 // SQLite version there's no need for a hand-rolled column-existence check —
 // these are safe to run every time the server starts.
 const MIGRATIONS_SQL = `
-  ALTER TABLE users ADD COLUMN IF NOT EXISTS license_number TEXT;
-  ALTER TABLE users ADD COLUMN IF NOT EXISTS license_state TEXT;
-  ALTER TABLE users ADD COLUMN IF NOT EXISTS license_expiration TEXT;
+  -- Barber license was dropped from the product: it added friction at signup
+  -- and wasn't verified against anything, so it wasn't earning its place.
+  -- These run once on existing databases and are no-ops afterward.
+  ALTER TABLE users DROP COLUMN IF EXISTS license_number;
+  ALTER TABLE users DROP COLUMN IF EXISTS license_state;
+  ALTER TABLE users DROP COLUMN IF EXISTS license_expiration;
   ALTER TABLE listings ADD COLUMN IF NOT EXISTS lat REAL;
   ALTER TABLE listings ADD COLUMN IF NOT EXISTS lon REAL;
   ALTER TABLE listings ADD COLUMN IF NOT EXISTS cancellation_policy TEXT DEFAULT 'standard';
+  -- 'exact' when the street address itself was found, 'city' when only the
+  -- city/state could be located (so the map shows an approximate area rather
+  -- than pretending to know the precise spot).
+  ALTER TABLE listings ADD COLUMN IF NOT EXISTS geo_precision TEXT;
+
+  -- profile fields (the "My Profile" page). Everything here is optional —
+  -- accounts created before this existed simply have nulls.
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_url TEXT;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS instagram TEXT;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS years_experience INTEGER;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS specialties TEXT;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS shop_name TEXT;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS website TEXT;
 `;
 
 function hashPassword(password, salt) {

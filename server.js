@@ -68,38 +68,69 @@ function sendEmail({ to, subject, html }) {
 // max ~1 request/sec, which is fine for a prototype's occasional listing
 // creates/edits (this isn't called on every page view, only when a listing's
 // address changes).
-function geocodeListing(listingId, address, city, state, zip) {
-  const query = [address, city, state, zip].filter(Boolean).join(', ');
-  if (!query) return;
-  const reqPath = `/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
-  const req = https.request(
-    {
-      hostname: 'nominatim.openstreetmap.org',
-      path: reqPath,
-      method: 'GET',
-      headers: { 'User-Agent': 'ChairSpace-Prototype/1.0 (contact: chairspace app)' },
-    },
-    (res) => {
-      let body = '';
-      res.on('data', (c) => (body += c));
-      res.on('end', async () => {
-        try {
-          const results = JSON.parse(body);
-          if (Array.isArray(results) && results[0]) {
-            const lat = Number(results[0].lat);
-            const lon = Number(results[0].lon);
-            if (Number.isFinite(lat) && Number.isFinite(lon)) {
-              await db.prepare('UPDATE listings SET lat = ?, lon = ? WHERE id = ?').run(lat, lon, listingId);
+// Looks up a single free-text query. Resolves to {lat, lon} or null — never
+// throws, so callers can treat geocoding as best-effort.
+function geocodeQuery(query) {
+  return new Promise((resolve) => {
+    const reqPath = `/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
+    const req = https.request(
+      {
+        hostname: 'nominatim.openstreetmap.org',
+        path: reqPath,
+        method: 'GET',
+        headers: { 'User-Agent': 'ChairSpace-Prototype/1.0 (contact: chairspace app)' },
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => {
+          try {
+            const results = JSON.parse(body);
+            if (Array.isArray(results) && results[0]) {
+              const lat = Number(results[0].lat);
+              const lon = Number(results[0].lon);
+              if (Number.isFinite(lat) && Number.isFinite(lon)) return resolve({ lat, lon });
             }
+          } catch (e) {
+            console.error('[geocode error]', e.message);
           }
-        } catch (e) {
-          console.error('[geocode error]', e.message);
-        }
-      });
-    }
-  );
-  req.on('error', (e) => console.error('[geocode error]', e.message));
-  req.end();
+          resolve(null);
+        });
+      }
+    );
+    req.on('error', (e) => {
+      console.error('[geocode error]', e.message);
+      resolve(null);
+    });
+    req.end();
+  });
+}
+
+// Tries the full street address first. If that can't be found (a typo, a brand
+// new address, a shop with no street number), it falls back to just the
+// city/state so the listing can still show an approximate-area map instead of
+// no map at all. `geo_precision` records which one we got.
+async function geocodeListing(listingId, address, city, state, zip) {
+  const hasStreet = Boolean(address && String(address).trim());
+  const full = [address, city, state, zip].filter(Boolean).join(', ');
+  const cityOnly = [city, state].filter(Boolean).join(', ');
+
+  let hit = null;
+  let precision = null;
+
+  if (full) {
+    hit = await geocodeQuery(full);
+    if (hit) precision = hasStreet ? 'exact' : 'city';
+  }
+  if (!hit && cityOnly && cityOnly !== full) {
+    hit = await geocodeQuery(cityOnly);
+    if (hit) precision = 'city';
+  }
+  if (!hit) return;
+
+  await db
+    .prepare('UPDATE listings SET lat = ?, lon = ?, geo_precision = ? WHERE id = ?')
+    .run(hit.lat, hit.lon, precision, listingId);
 }
 
 // ---------- saved search alerts ----------
@@ -302,14 +333,37 @@ const ALLOWED_IMAGE_TYPES = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/
 const MAX_PHOTOS = 5;
 const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 
+// Every column safe to hand back to the account's own owner — i.e. everything
+// except password_hash and salt. Kept in one place so the profile fields stay
+// consistent across signup, login, /api/me, and profile updates.
+const USER_FIELDS =
+  'id, name, email, role, phone, bio, photo_url, city, instagram, years_experience, ' +
+  'specialties, shop_name, website, created_at';
+
+// `specialties` is stored as a JSON string; hand it to the frontend as a real
+// array so callers never have to remember to parse it.
+function publicUser(row) {
+  if (!row) return null;
+  let specialties = [];
+  if (row.specialties) {
+    try {
+      const parsed = JSON.parse(row.specialties);
+      if (Array.isArray(parsed)) specialties = parsed;
+    } catch (e) {
+      specialties = [];
+    }
+  }
+  return { ...row, specialties };
+}
+
 async function getSessionUser(req) {
   const auth = req.headers['authorization'] || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
   if (!token) return null;
   const row = await db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
   if (!row) return null;
-  const user = await db.prepare('SELECT id, name, email, role, phone, bio, license_number, license_state, license_expiration, created_at FROM users WHERE id = ?').get(row.user_id);
-  return user || null;
+  const user = await db.prepare(`SELECT ${USER_FIELDS} FROM users WHERE id = ?`).get(row.user_id);
+  return publicUser(user);
 }
 
 function publicListing(row) {
@@ -332,6 +386,7 @@ function publicListing(row) {
     cancellation_policy: row.cancellation_policy || 'standard',
     lat: row.lat === undefined ? null : row.lat,
     lon: row.lon === undefined ? null : row.lon,
+    geo_precision: row.geo_precision || null,
     active: !!row.active,
     created_at: row.created_at,
   };
@@ -356,7 +411,7 @@ function route(method, pattern, handler) {
 
 route('POST', '/api/signup', async (req, res) => {
   const body = await readBody(req);
-  const { name, email, password, role, phone, bio, license_number, license_state, license_expiration } = body;
+  const { name, email, password, role, phone, bio } = body;
   if (!name || !email || !password || !role) {
     return send(res, 400, { error: 'name, email, password, and role are required' });
   }
@@ -368,22 +423,17 @@ route('POST', '/api/signup', async (req, res) => {
 
   const salt = crypto.randomBytes(16).toString('hex');
   const password_hash = hashPassword(password, salt);
-  // License fields only meaningfully apply to barbers, but we don't reject
-  // an owner for sending them — just store null for non-barbers.
-  const lic = role === 'barber' ? (license_number || null) : null;
-  const licState = role === 'barber' ? (license_state || null) : null;
-  const licExp = role === 'barber' ? (license_expiration || null) : null;
   const info = await db.prepare(`
-    INSERT INTO users (name, email, password_hash, salt, role, phone, bio, license_number, license_state, license_expiration, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO users (name, email, password_hash, salt, role, phone, bio, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     RETURNING id
-  `).run(name, email.toLowerCase().trim(), password_hash, salt, role, phone || null, bio || null, lic, licState, licExp, new Date().toISOString());
+  `).run(name, email.toLowerCase().trim(), password_hash, salt, role, phone || null, bio || null, new Date().toISOString());
 
   const userId = Number(info.lastInsertRowid);
   const token = crypto.randomBytes(24).toString('hex');
   await db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)').run(token, userId, new Date().toISOString());
 
-  const user = await db.prepare('SELECT id, name, email, role, phone, bio, license_number, license_state, license_expiration, created_at FROM users WHERE id = ?').get(userId);
+  const user = publicUser(await db.prepare(`SELECT ${USER_FIELDS} FROM users WHERE id = ?`).get(userId));
   send(res, 201, { token, user });
 });
 
@@ -401,11 +451,7 @@ route('POST', '/api/login', async (req, res) => {
   const token = crypto.randomBytes(24).toString('hex');
   await db.prepare('INSERT INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)').run(token, row.id, new Date().toISOString());
 
-  const user = {
-    id: row.id, name: row.name, email: row.email, role: row.role, phone: row.phone, bio: row.bio,
-    license_number: row.license_number, license_state: row.license_state, license_expiration: row.license_expiration,
-    created_at: row.created_at,
-  };
+  const user = publicUser(await db.prepare(`SELECT ${USER_FIELDS} FROM users WHERE id = ?`).get(row.id));
   send(res, 200, { token, user });
 });
 
@@ -420,6 +466,152 @@ route('GET', '/api/me', async (req, res) => {
   const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
   send(res, 200, { user });
+});
+
+// --- Profile ---
+
+const MAX_SPECIALTIES = 12;
+
+route('PATCH', '/api/me', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return send(res, 401, { error: 'Not logged in' });
+  const body = await readBody(req);
+
+  const fields = [];
+  const args = [];
+  const setText = (col, value, max = 400) => {
+    const v = value === null || value === undefined ? null : String(value).trim().slice(0, max);
+    fields.push(`${col} = ?`);
+    args.push(v || null);
+  };
+
+  if (body.name !== undefined) {
+    const name = String(body.name).trim();
+    if (!name) return send(res, 400, { error: 'Name can’t be empty' });
+    fields.push('name = ?');
+    args.push(name.slice(0, 120));
+  }
+
+  // Email doubles as the login, so it needs a uniqueness check before it moves.
+  if (body.email !== undefined) {
+    const email = String(body.email).toLowerCase().trim();
+    if (!email || !email.includes('@')) return send(res, 400, { error: 'Enter a valid email address' });
+    if (email !== user.email) {
+      const taken = await db.prepare('SELECT id FROM users WHERE email = ? AND id <> ?').get(email, user.id);
+      if (taken) return send(res, 409, { error: 'Another account already uses that email' });
+    }
+    fields.push('email = ?');
+    args.push(email);
+  }
+
+  if (body.phone !== undefined) setText('phone', body.phone, 40);
+  if (body.bio !== undefined) setText('bio', body.bio, 1000);
+  if (body.city !== undefined) setText('city', body.city, 120);
+
+  if (user.role === 'barber') {
+    if (body.instagram !== undefined) {
+      // store bare handles, however the person typed it in
+      const handle = String(body.instagram || '').trim().replace(/^@+/, '').replace(/^https?:\/\/(www\.)?instagram\.com\//i, '').replace(/\/+$/, '');
+      fields.push('instagram = ?');
+      args.push(handle ? handle.slice(0, 60) : null);
+    }
+    if (body.years_experience !== undefined) {
+      const yearsRaw = body.years_experience;
+      let years = null;
+      if (yearsRaw !== null && yearsRaw !== '') {
+        years = Number(yearsRaw);
+        if (!Number.isFinite(years) || years < 0 || years > 70) {
+          return send(res, 400, { error: 'Years cutting should be a number between 0 and 70' });
+        }
+        years = Math.round(years);
+      }
+      fields.push('years_experience = ?');
+      args.push(years);
+    }
+    if (body.specialties !== undefined) {
+      const list = Array.isArray(body.specialties) ? body.specialties : [];
+      const clean = list
+        .map((s) => String(s).trim().slice(0, 40))
+        .filter(Boolean)
+        .slice(0, MAX_SPECIALTIES);
+      fields.push('specialties = ?');
+      args.push(clean.length ? JSON.stringify(clean) : null);
+    }
+  }
+
+  if (user.role === 'owner') {
+    if (body.shop_name !== undefined) setText('shop_name', body.shop_name, 120);
+    if (body.website !== undefined) setText('website', body.website, 300);
+  }
+
+  if (!fields.length) return send(res, 400, { error: 'Nothing to update' });
+
+  args.push(user.id);
+  await db.prepare(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`).run(...args);
+  const updated = publicUser(await db.prepare(`SELECT ${USER_FIELDS} FROM users WHERE id = ?`).get(user.id));
+  send(res, 200, { user: updated });
+});
+
+route('POST', '/api/me/password', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return send(res, 401, { error: 'Not logged in' });
+  const body = await readBody(req);
+  const current = body.current_password || '';
+  const next = body.new_password || '';
+  if (!current || !next) return send(res, 400, { error: 'Enter your current and new password' });
+  if (String(next).length < 6) return send(res, 400, { error: 'New password must be at least 6 characters' });
+
+  const row = await db.prepare('SELECT password_hash, salt FROM users WHERE id = ?').get(user.id);
+  if (!row || hashPassword(current, row.salt) !== row.password_hash) {
+    return send(res, 401, { error: 'Your current password isn’t right' });
+  }
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const password_hash = hashPassword(next, salt);
+  await db.prepare('UPDATE users SET password_hash = ?, salt = ? WHERE id = ?').run(password_hash, salt, user.id);
+  send(res, 200, { ok: true });
+});
+
+route('POST', '/api/me/photo', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return send(res, 401, { error: 'Not logged in' });
+
+  if (!getCloudinaryConfig()) {
+    return send(res, 503, { error: "Photo uploads aren't set up yet — add your Cloudinary credentials in Render's Environment settings." });
+  }
+
+  const contentType = req.headers['content-type'] || '';
+  const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  if (!contentType.startsWith('multipart/form-data') || !boundaryMatch) {
+    return send(res, 400, { error: 'Expected multipart/form-data upload' });
+  }
+  const boundary = boundaryMatch[1] || boundaryMatch[2];
+
+  let raw;
+  try {
+    raw = await readRawBody(req, MAX_PHOTO_BYTES + 1024 * 1024);
+  } catch (e) {
+    return send(res, 413, { error: e.message });
+  }
+
+  const { files } = parseMultipart(raw, boundary);
+  const file = files.find((f) => f.name === 'photo' || f.name === 'photos');
+  if (!file) return send(res, 400, { error: 'No file uploaded' });
+  if (file.data.length > MAX_PHOTO_BYTES) return send(res, 400, { error: 'That image is larger than 5MB' });
+  if (!ALLOWED_IMAGE_TYPES[file.contentType]) {
+    return send(res, 400, { error: 'Use a JPG, PNG, WEBP, or GIF image' });
+  }
+
+  let url;
+  try {
+    url = await uploadToCloudinary(file.data, file.contentType);
+  } catch (e) {
+    return send(res, 502, { error: `Photo upload failed: ${e.message}` });
+  }
+
+  await db.prepare('UPDATE users SET photo_url = ? WHERE id = ?').run(url, user.id);
+  const updated = publicUser(await db.prepare(`SELECT ${USER_FIELDS} FROM users WHERE id = ?`).get(user.id));
+  send(res, 200, { user: updated });
 });
 
 // --- Listings ---
@@ -493,7 +685,7 @@ route('POST', '/api/listings', async (req, res) => {
   const listing = publicListing(await db.prepare('SELECT * FROM listings WHERE id = ?').get(listingId));
   send(res, 201, { listing });
 
-  geocodeListing(listingId, address, city, state, zip);
+  geocodeListing(listingId, address, city, state, zip).catch((e) => console.error('[geocode error]', e.message));
   notifySavedSearchMatches(listing).catch((e) => console.error('[saved search notify error]', e.message));
 });
 
@@ -524,7 +716,10 @@ route('PATCH', '/api/listings/:id', async (req, res, params) => {
   send(res, 200, { listing: updated });
 
   const addressChanged = ['address', 'city', 'state', 'zip'].some((k) => body[k] !== undefined);
-  if (addressChanged) geocodeListing(params.id, updated.address, updated.city, updated.state, updated.zip);
+  if (addressChanged) {
+    geocodeListing(params.id, updated.address, updated.city, updated.state, updated.zip)
+      .catch((e) => console.error('[geocode error]', e.message));
+  }
 });
 
 route('POST', '/api/listings/:id/photos', async (req, res, params) => {
@@ -1196,6 +1391,24 @@ const server = http.createServer(async (req, res) => {
   send(res, 404, { error: 'Not found' });
 });
 
+// Listings created before geocoding existed — including the seeded samples —
+// have no coordinates, so their pages show no map at all. Fill those in in the
+// background after startup. Requests are spaced ~1.2s apart to stay inside
+// Nominatim's ~1 request/second usage policy, and capped so a boot never turns
+// into a long crawl. Runs after listen() so it never delays serving traffic.
+async function backfillMissingCoords() {
+  const rows = await db
+    .prepare('SELECT id, address, city, state, zip FROM listings WHERE lat IS NULL ORDER BY id LIMIT 20')
+    .all();
+  if (!rows.length) return;
+  console.log(`Backfilling map coordinates for ${rows.length} listing(s)...`);
+  for (const r of rows) {
+    await geocodeListing(r.id, r.address, r.city, r.state, r.zip);
+    await new Promise((res) => setTimeout(res, 1200));
+  }
+  console.log('Coordinate backfill complete.');
+}
+
 // Wait for the database (schema + migrations + sample-data seed) to be ready
 // before accepting any traffic, so no request can race the initial setup.
 ready
@@ -1203,6 +1416,7 @@ ready
     server.listen(PORT, () => {
       console.log(`ChairSpace running at http://localhost:${PORT}`);
     });
+    backfillMissingCoords().catch((e) => console.error('[backfill error]', e.message));
   })
   .catch((err) => {
     console.error('Failed to initialize the database:', err.message);
