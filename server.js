@@ -72,7 +72,14 @@ function sendEmail({ to, subject, html }) {
 // throws, so callers can treat geocoding as best-effort.
 function geocodeQuery(query) {
   return new Promise((resolve) => {
-    const reqPath = `/search?format=json&limit=1&q=${encodeURIComponent(query)}`;
+    // addressdetails=1 asks Nominatim to break the match down into
+    // house_number/road/city/etc. We need this because Nominatim will still
+    // return *a* result for a full street-address query even when it can
+    // only actually match down to the city — without checking the address
+    // breakdown we'd have no way to tell "found the building" apart from
+    // "gave up and matched the city", and would mislabel a city-level guess
+    // as an exact pin.
+    const reqPath = `/search?format=json&limit=1&addressdetails=1&q=${encodeURIComponent(query)}`;
     const req = https.request(
       {
         hostname: 'nominatim.openstreetmap.org',
@@ -86,10 +93,15 @@ function geocodeQuery(query) {
         res.on('end', () => {
           try {
             const results = JSON.parse(body);
-            if (Array.isArray(results) && results[0]) {
-              const lat = Number(results[0].lat);
-              const lon = Number(results[0].lon);
-              if (Number.isFinite(lat) && Number.isFinite(lon)) return resolve({ lat, lon });
+            const r = Array.isArray(results) && results[0];
+            if (r) {
+              const lat = Number(r.lat);
+              const lon = Number(r.lon);
+              if (Number.isFinite(lat) && Number.isFinite(lon)) {
+                const addr = r.address || {};
+                const isStreetLevel = Boolean(addr.house_number || addr.road);
+                return resolve({ lat, lon, isStreetLevel });
+              }
             }
           } catch (e) {
             console.error('[geocode error]', e.message);
@@ -120,7 +132,10 @@ async function geocodeListing(listingId, address, city, state, zip) {
 
   if (full) {
     hit = await geocodeQuery(full);
-    if (hit) precision = hasStreet ? 'exact' : 'city';
+    // Only trust "exact" when we both asked for a street address AND
+    // Nominatim actually matched down to a house number or road — not just
+    // whenever the query happened to return *something*.
+    if (hit) precision = (hasStreet && hit.isStreetLevel) ? 'exact' : 'city';
   }
   if (!hit && cityOnly && cityOnly !== full) {
     hit = await geocodeQuery(cityOnly);
@@ -504,7 +519,13 @@ route('PATCH', '/api/me', async (req, res) => {
     args.push(email);
   }
 
-  if (body.phone !== undefined) setText('phone', body.phone, 40);
+  if (body.phone !== undefined) {
+    const rawPhone = body.phone === null || body.phone === undefined ? '' : String(body.phone).trim();
+    if (rawPhone && rawPhone.replace(/\D/g, '').length < 7) {
+      return send(res, 400, { error: 'Enter a valid phone number' });
+    }
+    setText('phone', rawPhone, 40);
+  }
   if (body.bio !== undefined) setText('bio', body.bio, 1000);
   if (body.city !== undefined) setText('city', body.city, 120);
 
@@ -664,6 +685,10 @@ route('POST', '/api/listings', async (req, res) => {
   const user = await getSessionUser(req);
   if (!user) return send(res, 401, { error: 'Not logged in' });
   if (user.role !== 'owner') return send(res, 403, { error: 'Only space owners can post listings' });
+  // Renters call the number on file, so a listing can't go live without one.
+  if (!user.phone || String(user.phone).replace(/\D/g, '').length < 7) {
+    return send(res, 400, { error: 'Add a phone number to your profile before posting a listing, so renters can call you about it.' });
+  }
 
   const body = await readBody(req);
   const { title, description, address, city, state, zip, price, price_unit, chair_type, available_from, total_chairs, cancellation_policy } = body;
@@ -1397,8 +1422,19 @@ const server = http.createServer(async (req, res) => {
 // Nominatim's ~1 request/second usage policy, and capped so a boot never turns
 // into a long crawl. Runs after listen() so it never delays serving traffic.
 async function backfillMissingCoords() {
+  // TEMPORARY (added Aug 19): also re-check listings already marked 'exact'.
+  // The precision check used to trust any result Nominatim returned for a
+  // full-address query, even when Nominatim could only match down to the
+  // city — that could mislabel a city-level guess as an exact pin. Listings
+  // geocoded before this fix need one re-check against the corrected logic.
+  // Safe to narrow this back to just `lat IS NULL` in a later cleanup once
+  // existing listings have all passed through it once.
   const rows = await db
-    .prepare('SELECT id, address, city, state, zip FROM listings WHERE lat IS NULL ORDER BY id LIMIT 20')
+    .prepare(`
+      SELECT id, address, city, state, zip FROM listings
+      WHERE lat IS NULL OR (geo_precision = 'exact' AND address IS NOT NULL AND address <> '')
+      ORDER BY id LIMIT 20
+    `)
     .all();
   if (!rows.length) return;
   console.log(`Backfilling map coordinates for ${rows.length} listing(s)...`);
