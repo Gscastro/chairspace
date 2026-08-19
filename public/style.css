@@ -800,6 +800,11 @@ footer.site {
 /* map embed on listing detail (Leaflet + CARTO Voyager tiles) */
 .map-embed {
   margin-top: 18px;
+  /* On a short listing page (little/no description, no reviews yet), the map
+     is the last visible block above the sticky mobile Contact/Call bar —
+     without real breathing room here it reads as glued to the map's own
+     attribution tag right above it. */
+  margin-bottom: 24px;
   border-radius: var(--radius);
   overflow: hidden;
   border: 1px solid var(--line);
