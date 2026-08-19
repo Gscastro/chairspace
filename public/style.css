@@ -530,10 +530,9 @@ h2.section-title { font-size: 1.4rem; margin: 46px 0 18px; font-weight: 800; let
     align-items: center;
     gap: 8px;
     padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
-    background: rgba(255, 255, 255, 0.96);
-    backdrop-filter: saturate(180%) blur(10px);
+    background: #fff;
     border-top: 1px solid var(--line);
-    box-shadow: 0 -6px 24px rgba(16, 24, 40, 0.08);
+    box-shadow: 0 -8px 20px rgba(16, 24, 40, 0.14);
   }
   .mobile-cta-bar .pill-btn {
     margin: 0;
@@ -832,16 +831,34 @@ footer.site {
   font-weight: 500;
 }
 #listing-map.map-fallback .cta-secondary { flex: 0 0 auto; }
-.leaflet-container { font-family: inherit; }
+.leaflet-container { font-family: inherit; position: relative; }
+/* Leaflet's own stylesheet (loaded from a CDN) is what normally keeps the
+   zoom buttons and attribution tag pinned to the map's corners instead of
+   sitting in normal document flow. Re-declaring the handful of rules that
+   layout depends on here — in our own same-origin stylesheet — means the
+   map still looks right even if that CDN request is ever slow, blocked, or
+   fails, instead of the attribution line spilling out below the map. */
+.leaflet-control-container .leaflet-top,
+.leaflet-control-container .leaflet-bottom { position: absolute; z-index: 1000; pointer-events: none; }
+.leaflet-top { top: 0; }
+.leaflet-bottom { bottom: 0; }
+.leaflet-left { left: 0; }
+.leaflet-right { right: 0; }
+.leaflet-control-container .leaflet-control { pointer-events: auto; float: left; clear: both; }
+.leaflet-right .leaflet-control { float: right; }
+.leaflet-bottom .leaflet-control { margin-bottom: 0; }
 /* soften Leaflet's default chrome to match the app's palette instead of the stock look */
 .leaflet-control-zoom a {
   color: var(--ink) !important;
   border-radius: 6px !important;
 }
-.leaflet-control-zoom { border: none !important; box-shadow: var(--shadow) !important; }
+.leaflet-control-zoom { border: none !important; box-shadow: var(--shadow) !important; margin: 10px !important; }
 .leaflet-control-attribution {
   background: rgba(255, 255, 255, 0.82) !important;
   font-size: 0.68rem !important;
+  margin: 0 6px 6px 0 !important;
+  padding: 1px 6px !important;
+  border-radius: 4px;
 }
 .chairspace-pin span {
   display: block;
