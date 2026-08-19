@@ -476,6 +476,20 @@ const App = (() => {
     return null;
   }
 
+  // The listing page already shows a map, so the second action button leads
+  // with "Call now" (using the phone on the owner's account) rather than
+  // directions. New listings require a phone before they can be posted, but
+  // listings from before that requirement may still have an owner with no
+  // number on file — for those, fall back to Directions so the button isn't
+  // just missing.
+  function secondaryCtaHtml(l) {
+    const tel = telHref(l.owner.phone);
+    if (tel) return `<a class="cta-secondary" href="${tel}">📞 Call now</a>`;
+    const dir = directionsUrl(l);
+    if (dir) return `<a class="cta-secondary" href="${dir}" target="_blank" rel="noopener">📍 Directions</a>`;
+    return '';
+  }
+
   function star(n) { return '★'.repeat(n) + '☆'.repeat(5 - n); }
 
   async function loadListingReviews(listingId) {
@@ -563,8 +577,7 @@ const App = (() => {
             ${!isOwnerOfThis ? `<button class="pill-btn contact-owner-btn" type="button" onclick="App.openContactModal(${l.id})">Contact Owner</button>` : ''}
             ${!isOwnerOfThis ? `
               <div class="cta-row">
-                ${telHref(l.owner.phone) ? `<a class="cta-secondary" href="${telHref(l.owner.phone)}">📞 Call</a>` : ''}
-                ${directionsUrl(l) ? `<a class="cta-secondary" href="${directionsUrl(l)}" target="_blank" rel="noopener">📍 Directions</a>` : ''}
+                ${secondaryCtaHtml(l)}
               </div>
             ` : ''}
             <div id="request-area" style="margin-top:14px;"></div>
@@ -576,8 +589,7 @@ const App = (() => {
         <div class="mobile-cta-spacer" aria-hidden="true"></div>
         <div class="mobile-cta-bar">
           <button class="pill-btn" type="button" onclick="App.openContactModal(${l.id})">Contact Owner</button>
-          ${telHref(l.owner.phone) ? `<a class="cta-secondary" href="${telHref(l.owner.phone)}">📞 Call</a>` : ''}
-          ${directionsUrl(l) ? `<a class="cta-secondary" href="${directionsUrl(l)}" target="_blank" rel="noopener">📍 Directions</a>` : ''}
+          ${secondaryCtaHtml(l)}
         </div>
       ` : ''}
     `;
@@ -838,6 +850,12 @@ const App = (() => {
       </div>
       <form class="stack listing-form" onsubmit="App.saveListing(event, ${editId ? editId : 'null'})">
         <div class="step-panel" data-panel="0">
+          ${!state.user.phone ? `
+          <div class="field">
+            <label>Your phone number</label>
+            <input type="tel" name="owner_phone" required placeholder="So renters can call you about this listing" />
+            <p class="hint">Saved to your account — you'll only need to enter this once.</p>
+          </div>` : ''}
           <div class="field"><label>Title</label><input type="text" name="title" required value="${escapeHtml(e.title || '')}" placeholder="e.g. Open booth in busy East Austin shop" /></div>
           <div class="field"><label>Description</label><textarea name="description" placeholder="Describe the space, the shop, expectations...">${escapeHtml(e.description || '')}</textarea></div>
           <div class="field"><label>Space type</label>
@@ -1068,6 +1086,19 @@ const App = (() => {
     if (!validatePanel(postListingState.step)) return;
     const f = new FormData(evt.target);
     const msgEl = document.getElementById('listing-msg');
+    // Owners without a phone on file get an inline field on step 1 (see
+    // renderPostListing) — save it to the account before creating the listing
+    // so the Call Now button on the listing page has a number to use.
+    if (f.has('owner_phone')) {
+      try {
+        const { user } = await api('/api/me', { method: 'PATCH', body: { phone: f.get('owner_phone') } });
+        state.user = user;
+        renderNav();
+      } catch (e) {
+        msgEl.innerHTML = `<p class="msg">${escapeHtml(e.message)}</p>`;
+        return;
+      }
+    }
     const payload = {
       title: f.get('title'), description: f.get('description'),
       city: f.get('city'), state: f.get('state'), address: f.get('address'), zip: f.get('zip'),
