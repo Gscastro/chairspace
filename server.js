@@ -1243,12 +1243,34 @@ function serveStatic(req, res, pathname) {
       });
       return;
     }
+    const ext = path.extname(filePath);
+    // CSS/JS are the assets a design/behavior fix actually lives in, and
+    // they're also the ones most at risk of a client (some in-app browsers
+    // especially) holding onto a stale copy instead of properly revalidating
+    // the ETag below — which would make a real, deployed fix look like it
+    // never took effect. Forcing no-store on just these two means every
+    // deploy is guaranteed to actually show up, at the cost of a bit more
+    // bandwidth on a prototype-scale site.
+    if (ext === '.css' || ext === '.js') {
+      fs.readFile(filePath, (err, data) => {
+        if (err) {
+          res.writeHead(404);
+          return res.end('Not found');
+        }
+        res.writeHead(200, {
+          'Content-Type': MIME[ext] || 'application/octet-stream',
+          'Cache-Control': 'no-store',
+        });
+        res.end(data);
+      });
+      return;
+    }
+
     const etag = `"${stat.size}-${Math.round(stat.mtimeMs)}"`;
     if (req.headers['if-none-match'] === etag) {
       res.writeHead(304, { ETag: etag });
       return res.end();
     }
-    const ext = path.extname(filePath);
     fs.readFile(filePath, (err, data) => {
       if (err) {
         res.writeHead(404);
