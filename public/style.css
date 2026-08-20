@@ -802,15 +802,36 @@ footer.site {
   margin-top: 18px;
   /* On a short listing page (little/no description, no reviews yet), the map
      is the last visible block above the sticky mobile Contact/Call bar —
-     without real breathing room here it reads as glued to the map's own
-     attribution tag right above it. */
+     without real breathing room here it reads as glued to the buttons
+     right below it. */
   margin-bottom: 24px;
   border-radius: var(--radius);
   overflow: hidden;
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
 }
+/* Required OpenStreetMap/CARTO credit, shown as our own plain caption rather
+   than Leaflet's built-in attribution control — that control is positioned
+   by Leaflet's own CDN stylesheet, which in production kept placing the
+   credit line below the map instead of tucked in its corner. Ordinary
+   document flow can't "spill" anywhere, so this can't repeat that problem. */
+.map-credit {
+  padding: 6px 12px;
+  background: #fff;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+.map-credit a { color: var(--muted); }
 #listing-map { width: 100%; height: 260px; background: #EEF1F5; font-family: inherit; }
+/* On a phone, the hero photo + title + address + description already use up
+   most of one screen's height before the map even starts — a short listing
+   (little description, no reviews yet) can land with the map's bottom edge
+   sitting right where the fixed Contact/Call bar always is, the instant the
+   page loads, before any scrolling happens. Trimming the map shorter here
+   gives that combination genuine room to clear the bar at rest instead of
+   relying on the visitor to scroll past it first. */
+@media (max-width: 640px) { #listing-map { height: 200px; } }
 /* shown in place of the map when Leaflet can't load, so the space is never
    just a blank gray rectangle */
 #listing-map.map-fallback {
@@ -838,11 +859,10 @@ footer.site {
 #listing-map.map-fallback .cta-secondary { flex: 0 0 auto; }
 .leaflet-container { font-family: inherit; position: relative; }
 /* Leaflet's own stylesheet (loaded from a CDN) is what normally keeps the
-   zoom buttons and attribution tag pinned to the map's corners instead of
-   sitting in normal document flow. Re-declaring the handful of rules that
-   layout depends on here — in our own same-origin stylesheet — means the
-   map still looks right even if that CDN request is ever slow, blocked, or
-   fails, instead of the attribution line spilling out below the map. */
+   zoom buttons pinned to the map's corner instead of sitting in normal
+   document flow. Re-declaring the handful of rules that layout depends on
+   here — in our own same-origin stylesheet — means the map still looks
+   right even if that CDN request is ever slow, blocked, or fails. */
 .leaflet-control-container .leaflet-top,
 .leaflet-control-container .leaflet-bottom { position: absolute; z-index: 1000; pointer-events: none; }
 .leaflet-top { top: 0; }
@@ -858,13 +878,6 @@ footer.site {
   border-radius: 6px !important;
 }
 .leaflet-control-zoom { border: none !important; box-shadow: var(--shadow) !important; margin: 10px !important; }
-.leaflet-control-attribution {
-  background: rgba(255, 255, 255, 0.82) !important;
-  font-size: 0.68rem !important;
-  margin: 0 6px 6px 0 !important;
-  padding: 1px 6px !important;
-  border-radius: 4px;
-}
 .chairspace-pin span {
   display: block;
   width: 16px;
