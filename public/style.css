@@ -698,6 +698,29 @@ form.listing-form { max-width: 560px; }
 /* centers the post/edit-listing page's column instead of leaving it hugging
    the left edge with dead space on wide screens */
 .form-page { max-width: 560px; margin: 0 auto; }
+
+/* ---------- public renter (barber) profile ---------- */
+.pro-page { max-width: 480px; margin: 0 auto; padding-bottom: 20px; }
+.pro-head { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding: 8px 0 20px; }
+.pro-head .avatar.lg { width: 92px; height: 92px; }
+.pro-head h1 { margin: 6px 0 0; font-size: 1.4rem; }
+.pro-role { color: var(--muted); font-size: 0.95rem; margin: 0; }
+.pro-city { color: var(--muted); font-size: 0.88rem; margin: 2px 0 0; }
+.pro-rating { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: #d8a300; font-weight: 700; }
+.pro-rating .count { color: var(--muted); font-weight: 500; font-size: 0.85rem; }
+.pro-section { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px; box-shadow: var(--shadow); }
+.pro-section h2 { font-size: 0.95rem; margin: 0 0 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; font-weight: 700; }
+.pro-bio { margin: 0; line-height: 1.5; }
+.pro-stats { display: flex; gap: 22px; flex-wrap: wrap; }
+.pro-stat b { display: block; font-size: 1.15rem; }
+.pro-stat span { color: var(--muted); font-size: 0.8rem; }
+.pro-review { padding: 10px 0; border-top: 1px solid var(--line); }
+.pro-review:first-child { border-top: none; padding-top: 0; }
+.pro-review .stars { color: #d8a300; font-size: 0.9rem; }
+.pro-review p { margin: 4px 0 0; font-size: 0.92rem; }
+.pro-review .who { color: var(--muted); font-size: 0.8rem; margin-top: 4px; }
+.pro-cta { display: block; text-align: center; background: var(--blue); color: #fff; border-radius: 999px; padding: 13px; font-weight: 700; text-decoration: none; margin-top: 4px; }
+
 .step-panel { display: flex; flex-direction: column; gap: 14px; }
 .step-panel[hidden] { display: none; }
 .step-nav {

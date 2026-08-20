@@ -130,6 +130,7 @@ const App = (() => {
     try {
       if (segs.length === 0) return renderHome(query);
       if (segs[0] === 'listing' && segs[1]) return renderListingDetail(segs[1]);
+      if (segs[0] === 'pro' && segs[1]) return renderRenterProfile(segs[1]);
       if (segs[0] === 'login') return renderLogin();
       if (segs[0] === 'signup') return renderSignup();
       if (segs[0] === 'dashboard') return renderDashboard();
@@ -393,6 +394,7 @@ const App = (() => {
     return `<div class="map-embed">
       <div id="listing-map" role="img" aria-label="Map showing the ${approx ? 'general area' : 'approximate location'} in ${escapeHtml(l.city)}, ${escapeHtml(l.state)}"></div>
       ${approx ? `<div class="map-note">General area only — the owner shares the exact address when you connect.</div>` : ''}
+      <div class="map-credit">Map data © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors, style by <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a></div>
     </div>`;
   }
 
@@ -408,9 +410,15 @@ const App = (() => {
     // a soft area circle at a wider zoom instead.
     const approx = l.geo_precision === 'city';
     try {
-      activeMap = L.map(el, { scrollWheelZoom: false, attributionControl: true }).setView([l.lat, l.lon], approx ? 12 : 14);
+      // attributionControl is off here on purpose — Leaflet's built-in control
+      // is positioned by its own CDN stylesheet, which turned out not to be
+      // reliable in production (the credit line kept spilling out below the
+      // map instead of staying tucked in a corner). We show the same required
+      // OpenStreetMap/CARTO credit ourselves instead, as a plain caption in
+      // mapContainerHtml() — normal document flow, so it can never "float"
+      // into the wrong place.
+      activeMap = L.map(el, { scrollWheelZoom: false, attributionControl: false }).setView([l.lat, l.lon], approx ? 12 : 14);
       L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>',
         maxZoom: 19,
         subdomains: 'abcd',
       }).addTo(activeMap);
@@ -715,6 +723,128 @@ const App = (() => {
     } catch (e) {
       if (msgEl) msgEl.innerHTML = `<p class="msg">${escapeHtml(e.message)}</p>`;
     }
+  }
+
+  // ---------- public renter (barber) profile ----------
+
+  function openBarberContactModal(barberId, name) {
+    const root = document.getElementById('modal-root');
+    if (!root) return;
+    root.innerHTML = `
+      <div class="modal-backdrop" onclick="if (event.target === this) App.closeContactModal()">
+        <div class="modal-card">
+          <button type="button" class="modal-close" onclick="App.closeContactModal()" aria-label="Close">&times;</button>
+          <h2>Contact ${escapeHtml(name)}</h2>
+          <p class="card-meta">Send your info straight to ${escapeHtml(name)} — no account needed.</p>
+          <form class="stack" onsubmit="App.submitBarberInquiry(event, ${barberId})">
+            <div class="field"><label>Your name</label><input type="text" name="name" required /></div>
+            <div class="field"><label>Your email</label><input type="email" name="email" required /></div>
+            <div class="field"><label>Phone number</label><input type="tel" name="phone" /></div>
+            <div class="field"><label>Shop / listing (optional)</label><input type="text" name="social" placeholder="Where's the chair?" /></div>
+            <div class="field"><label>Message</label><textarea name="message" placeholder="Tell them about the chair you have open..."></textarea></div>
+            <div class="modal-actions">
+              <button class="pill-btn" type="submit">Send</button>
+              <button class="pill-btn ghost" type="button" onclick="App.closeContactModal()">No thanks</button>
+            </div>
+            <div id="inquiry-msg"></div>
+          </form>
+        </div>
+      </div>
+    `;
+    document.body.style.overflow = 'hidden';
+  }
+
+  async function submitBarberInquiry(evt, barberId) {
+    evt.preventDefault();
+    const f = new FormData(evt.target);
+    const msgEl = document.getElementById('inquiry-msg');
+    try {
+      await api('/api/barbers/' + barberId + '/inquiries', {
+        method: 'POST',
+        body: {
+          name: f.get('name'), email: f.get('email'), phone: f.get('phone'),
+          social: f.get('social'), message: f.get('message'),
+        },
+      });
+      const card = document.querySelector('.modal-card');
+      if (card) {
+        card.innerHTML = `
+          <button type="button" class="modal-close" onclick="App.closeContactModal()" aria-label="Close">&times;</button>
+          <h2>Thanks!</h2>
+          <p class="card-meta">Your info was sent — they'll reach out directly.</p>
+          <button class="pill-btn" type="button" onclick="App.closeContactModal()">Done</button>
+        `;
+      }
+    } catch (e) {
+      if (msgEl) msgEl.innerHTML = `<p class="msg">${escapeHtml(e.message)}</p>`;
+    }
+  }
+
+  async function renderRenterProfile(id) {
+    $app().innerHTML = `<p class="spinner-note">Loading profile...</p>`;
+    let barber, reviewsData;
+    try {
+      const data = await api('/api/barbers/' + id + '/public');
+      barber = data.barber;
+    } catch (e) {
+      $app().innerHTML = `<div class="empty-state">This barber's profile isn't available yet — it goes live once they've completed their first rental on ChairSpace. <a href="/" onclick="event.preventDefault(); App.nav('/');" style="color:var(--blue-dark);font-weight:700;">Back to ChairSpace</a></div>`;
+      return;
+    }
+    try {
+      reviewsData = await api('/api/barbers/' + id + '/reviews');
+    } catch (e) {
+      reviewsData = { reviews: [], average: null, count: 0 };
+    }
+    const specialties = Array.isArray(barber.specialties) ? barber.specialties : [];
+
+    $app().innerHTML = `
+      <div class="pro-page">
+        <div class="pro-head">
+          ${avatarHtml(barber, 'lg')}
+          <h1>${escapeHtml(barber.name)}</h1>
+          <p class="pro-role">Barber${barber.years_experience ? ' · ' + barber.years_experience + (barber.years_experience === 1 ? ' year' : ' years') + ' cutting' : ''}</p>
+          ${barber.city ? `<p class="pro-city">${escapeHtml(barber.city)}</p>` : ''}
+          ${reviewsData.count ? `<div class="pro-rating">${star(Math.round(reviewsData.average))} <span class="count">${reviewsData.average.toFixed(1)} (${reviewsData.count} review${reviewsData.count === 1 ? '' : 's'})</span></div>` : ''}
+        </div>
+
+        ${barber.bio ? `
+        <div class="pro-section">
+          <h2>About</h2>
+          <p class="pro-bio">${escapeHtml(barber.bio)}</p>
+        </div>` : ''}
+
+        ${specialties.length ? `
+        <div class="pro-section">
+          <h2>Specialties</h2>
+          <div class="chip-row">
+            ${specialties.map((s) => `<span class="chip on">${escapeHtml(s)}</span>`).join('')}
+          </div>
+        </div>` : ''}
+
+        <div class="pro-section">
+          <h2>On ChairSpace</h2>
+          <div class="pro-stats">
+            <div class="pro-stat"><b>${barber.chairs_rented}</b><span>Chair${barber.chairs_rented === 1 ? '' : 's'} rented</span></div>
+            <div class="pro-stat"><b>${(new Date(barber.created_at)).getFullYear() || ''}</b><span>Member since</span></div>
+            ${barber.instagram ? `<div class="pro-stat"><b>${escapeHtml(barber.instagram)}</b><span>Instagram</span></div>` : ''}
+          </div>
+        </div>
+
+        ${reviewsData.count ? `
+        <div class="pro-section">
+          <h2>What shop owners say</h2>
+          ${reviewsData.reviews.map(r => `
+            <div class="pro-review">
+              <div class="stars">${star(r.rating)}</div>
+              ${r.comment ? `<p>${escapeHtml(r.comment)}</p>` : ''}
+              <div class="who">${escapeHtml(r.author ? r.author.name : 'A shop owner')} &middot; ${timeAgo(r.created_at)}</div>
+            </div>
+          `).join('')}
+        </div>` : ''}
+
+        <a class="pro-cta" href="#" onclick="event.preventDefault(); App.openBarberContactModal(${barber.id}, '${escapeHtml(barber.name).replace(/'/g, "\\'")}');">Contact ${escapeHtml(barber.name.split(' ')[0])} about a chair</a>
+      </div>
+    `;
   }
 
   // ---------- auth ----------
@@ -1210,6 +1340,7 @@ const App = (() => {
         <button id="tab-requests" class="active" onclick="App.showBarberTab('requests')">My Requests</button>
         <button id="tab-favorites" onclick="App.showBarberTab('favorites')">Favorites</button>
         <button id="tab-saved-searches" onclick="App.showBarberTab('saved-searches')">Saved Searches</button>
+        <button id="tab-pro-inquiries" onclick="App.showBarberTab('pro-inquiries')">Profile Inquiries</button>
       </div>
       <div id="tab-content"><p class="spinner-note">Loading...</p></div>
     `;
@@ -1222,6 +1353,7 @@ const App = (() => {
     document.getElementById('tab-requests').classList.toggle('active', tab === 'requests');
     document.getElementById('tab-favorites').classList.toggle('active', tab === 'favorites');
     document.getElementById('tab-saved-searches').classList.toggle('active', tab === 'saved-searches');
+    document.getElementById('tab-pro-inquiries').classList.toggle('active', tab === 'pro-inquiries');
     const content = document.getElementById('tab-content');
     content.innerHTML = `<p class="spinner-note">Loading...</p>`;
     try {
@@ -1239,17 +1371,38 @@ const App = (() => {
           return;
         }
         content.innerHTML = `<div class="grid">${listings.map(listingCard).join('')}</div>`;
-      } else {
+      } else if (tab === 'saved-searches') {
         const { searches } = await api('/api/saved-searches');
         if (searches.length === 0) {
           content.innerHTML = `<div class="empty-state">No saved searches yet. Search on the home page, then tap "Save this search" to get emailed when a new chair matches.</div>`;
           return;
         }
         content.innerHTML = searches.map(savedSearchRow).join('');
+      } else {
+        const { inquiries } = await api('/api/barbers/received-inquiries');
+        if (inquiries.length === 0) {
+          content.innerHTML = `<div class="empty-state">No inquiries yet. When a shop owner taps "Contact" on your public profile, it'll show up here.</div>`;
+          return;
+        }
+        content.innerHTML = inquiries.map(barberInquiryRow).join('');
       }
     } catch (e) {
       content.innerHTML = `<p class="msg">${escapeHtml(e.message)}</p>`;
     }
+  }
+
+  function barberInquiryRow(i) {
+    return `
+      <div class="request-row">
+        <div class="info">
+          <div class="card-meta">
+            <b>${escapeHtml(i.name)}</b> &middot; <a href="mailto:${escapeHtml(i.email)}" style="color:var(--blue-dark);">${escapeHtml(i.email)}</a>${i.phone ? ' &middot; ' + escapeHtml(i.phone) : ''}${i.social ? ' &middot; ' + escapeHtml(i.social) : ''}
+          </div>
+          ${i.message ? `<div class="card-meta" style="margin-top:4px;">${escapeHtml(i.message)}</div>` : ''}
+          <div class="card-meta" style="margin-top:4px;">${timeAgo(i.created_at)}</div>
+        </div>
+      </div>
+    `;
   }
 
   function savedSearchRow(s) {
@@ -1376,6 +1529,17 @@ const App = (() => {
           </div>
         </div>
 
+        ${isBarber ? `
+        <div class="section">
+          <h3>Public profile</h3>
+          <p class="hint">Share this link with shop owners so they can see your reviews and specialties. It goes live once you've completed your first rental on ChairSpace.</p>
+          <div class="row-2">
+            <input type="text" readonly id="pro-share-link" value="${escapeHtml(window.location.origin)}/pro/${u.id}" onclick="this.select()" />
+            <button type="button" class="pill-btn ghost" onclick="App.copyProShareLink()">Copy link</button>
+          </div>
+          <span id="pro-share-msg" class="hint"></span>
+        </div>` : ''}
+
         <div class="section">
           <h3>Photo</h3>
           <div class="photo-actions">
@@ -1461,6 +1625,19 @@ const App = (() => {
         </div>
       </div>
     `;
+  }
+
+  async function copyProShareLink() {
+    const input = document.getElementById('pro-share-link');
+    const msg = document.getElementById('pro-share-msg');
+    if (!input) return;
+    try {
+      await navigator.clipboard.writeText(input.value);
+      if (msg) msg.textContent = 'Copied!';
+    } catch (e) {
+      input.select();
+      if (msg) msg.textContent = 'Select and copy the link above.';
+    }
   }
 
   function toggleSpecialty(btn, name) {
@@ -1709,5 +1886,6 @@ const App = (() => {
     toggleMenu, toggleFavorite, showBarberTab, saveCurrentSearch, deleteSavedSearch,
     pickStar, submitReview,
     saveProfile, changePassword, uploadAvatar, toggleSpecialty,
+    openBarberContactModal, submitBarberInquiry, copyProShareLink,
   };
 })();
