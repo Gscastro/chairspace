@@ -1209,6 +1209,85 @@ route('GET', '/api/listings/:id/reviews', async (req, res, params) => {
   send(res, 200, { reviews: enriched, average: avg, count: enriched.length });
 });
 
+// --- Public renter (barber) profiles ---
+// A shareable, read-only page so a barber can show shop owners their track
+// record. Only goes live once the barber has at least one approved rental —
+// otherwise there's nothing to show and the link 404s. Deliberately excludes
+// email and phone; owners reach out through the inquiry form below instead,
+// same as the "Contact Owner" flow on a listing.
+
+async function barberEligibility(barberId) {
+  const user = await db.prepare(`SELECT ${USER_FIELDS} FROM users WHERE id = ?`).get(barberId);
+  if (!user || user.role !== 'barber') return { user: null, eligible: false };
+  const { count } = await db
+    .prepare("SELECT COUNT(DISTINCT listing_id)::int as count FROM requests WHERE barber_id = ? AND status = 'approved'")
+    .get(barberId);
+  return { user: publicUser(user), eligible: count > 0, chairsRented: count };
+}
+
+route('GET', '/api/barbers/:id/public', async (req, res, params) => {
+  const { user, eligible, chairsRented } = await barberEligibility(params.id);
+  if (!user || !eligible) return send(res, 404, { error: 'This profile is not available yet' });
+  const { name, city, bio, photo_url, instagram, years_experience, specialties, created_at, id } = user;
+  send(res, 200, { barber: { id, name, city, bio, photo_url, instagram, years_experience, specialties, created_at, chairs_rented: chairsRented } });
+});
+
+route('GET', '/api/barbers/:id/reviews', async (req, res, params) => {
+  const rows = await db.prepare(`
+    SELECT r.* FROM reviews r
+    WHERE r.target_type = 'barber' AND r.target_id = ?
+  `).all(params.id);
+  const counts = await Promise.all(rows.map((r) => reviewsVisibleCount(r.request_id)));
+  const visible = rows.filter((r, i) => counts[i] === 2);
+  const enriched = await Promise.all(visible.map(async (r) => {
+    const author = await db.prepare('SELECT id, name FROM users WHERE id = ?').get(r.author_id);
+    return { id: r.id, rating: r.rating, comment: r.comment, created_at: r.created_at, author: author ? { id: author.id, name: author.name } : null };
+  }));
+  const avg = enriched.length ? enriched.reduce((s, r) => s + r.rating, 0) / enriched.length : null;
+  send(res, 200, { reviews: enriched, average: avg, count: enriched.length });
+});
+
+route('POST', '/api/barbers/:id/inquiries', async (req, res, params) => {
+  const { user, eligible } = await barberEligibility(params.id);
+  if (!user || !eligible) return send(res, 404, { error: 'This profile is not available yet' });
+
+  const body = await readBody(req);
+  const { name, email, phone, social, message } = body;
+  if (!name || !name.trim()) return send(res, 400, { error: 'Name is required' });
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    return send(res, 400, { error: 'A valid email is required' });
+  }
+
+  const info = await db.prepare(`
+    INSERT INTO barber_inquiries (barber_id, name, email, phone, social, message, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    RETURNING id
+  `).run(params.id, name.trim(), email.trim(), phone || '', social || '', message || '', new Date().toISOString());
+
+  const created = await db.prepare('SELECT * FROM barber_inquiries WHERE id = ?').get(Number(info.lastInsertRowid));
+  send(res, 201, { inquiry: created });
+
+  const barberRow = await db.prepare('SELECT * FROM users WHERE id = ?').get(params.id);
+  if (barberRow) {
+    sendEmail({
+      to: barberRow.email,
+      subject: `${name.trim()} is interested in your ChairSpace profile`,
+      html: `<p><b>${escapeHtml(name.trim())}</b> (${escapeHtml(email.trim())}${phone ? ', ' + escapeHtml(phone) : ''}) reached out about renting a chair.</p>
+        ${message ? `<p>${escapeHtml(message)}</p>` : ''}
+        <p><a href="${PUBLIC_URL}/dashboard">View it on ChairSpace</a></p>`,
+    });
+  }
+});
+
+route('GET', '/api/barbers/received-inquiries', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return send(res, 401, { error: 'Not logged in' });
+  if (user.role !== 'barber') return send(res, 403, { error: 'Only barbers receive profile inquiries' });
+
+  const rows = await db.prepare('SELECT * FROM barber_inquiries WHERE barber_id = ? ORDER BY created_at DESC').all(user.id);
+  send(res, 200, { inquiries: rows });
+});
+
 // ---------- static file serving ----------
 
 const MIME = {
@@ -1371,6 +1450,51 @@ ${heroImg ? `<meta property="og:image" content="${escapeHtml(heroImg)}" />\n` : 
 </html>`;
 }
 
+function renderBarberProfilePage(req, barber) {
+  const host = req.headers.host || 'chairspace.onrender.com';
+  const base = `https://${host}`;
+  const url = `${base}/pro/${barber.id}`;
+  const title = `${barber.name} on ChairSpace`;
+  const rawDesc = barber.bio || `${barber.name} rents chairs through ChairSpace${barber.city ? ' in ' + barber.city : ''}.`;
+  const desc = rawDesc.length > 160 ? rawDesc.slice(0, 157) + '...' : rawDesc;
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>${escapeHtml(title)}</title>
+<meta name="description" content="${escapeHtml(desc)}" />
+<link rel="canonical" href="${url}" />
+<meta property="og:type" content="profile" />
+<meta property="og:title" content="${escapeHtml(title)}" />
+<meta property="og:description" content="${escapeHtml(desc)}" />
+${barber.photo_url ? `<meta property="og:image" content="${escapeHtml(barber.photo_url.startsWith('http') ? barber.photo_url : base + barber.photo_url)}" />\n` : ''}<meta property="og:url" content="${url}" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="site">
+    <div class="container">
+      <div class="logo" onclick="App.nav('/')">Chair<span>Space</span></div>
+      <button type="button" class="menu-toggle" id="menu-toggle" onclick="App.toggleMenu()" aria-label="Menu" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
+      <nav class="main" id="nav"></nav>
+    </div>
+  </header>
+  <main>
+    <div class="container" id="app"></div>
+  </main>
+  <footer class="site">
+    <div class="container">
+      ChairSpace — a prototype marketplace connecting barbers with open chairs, booths, and suites to rent.
+    </div>
+  </footer>
+  <div id="modal-root"></div>
+  <script src="/app.js"></script>
+</body>
+</html>`;
+}
+
 async function buildSitemap(req) {
   const host = req.headers.host || 'chairspace.onrender.com';
   const base = `https://${host}`;
@@ -1381,6 +1505,12 @@ async function buildSitemap(req) {
     xml += `  <url>\n    <loc>${base}/listing/${r.id}</loc>\n`;
     if (r.created_at) xml += `    <lastmod>${r.created_at.slice(0, 10)}</lastmod>\n`;
     xml += `  </url>\n`;
+  }
+  const barberRows = await db
+    .prepare("SELECT DISTINCT barber_id FROM requests WHERE status = 'approved'")
+    .all();
+  for (const r of barberRows) {
+    xml += `  <url>\n    <loc>${base}/pro/${r.barber_id}</loc>\n  </url>\n`;
   }
   xml += '</urlset>';
   return xml;
@@ -1416,6 +1546,16 @@ const server = http.createServer(async (req, res) => {
       }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
       return res.end(renderListingPage(req, publicListing(row)));
+    }
+    const proMatch = pathname.match(/^\/pro\/(\d+)\/?$/);
+    if (req.method === 'GET' && proMatch) {
+      const { user, eligible } = await barberEligibility(proMatch[1]);
+      if (!user || !eligible) {
+        res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+        return res.end('<!DOCTYPE html><title>Not found — ChairSpace</title><h1>Profile not found</h1><p><a href="/">Back to ChairSpace</a></p>');
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+      return res.end(renderBarberProfilePage(req, user));
     }
     return serveStatic(req, res, pathname);
   }
