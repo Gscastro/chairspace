@@ -138,8 +138,8 @@ const SCHEMA_SQL = `
     created_at TEXT NOT NULL
   );
 
-  -- Reverse of `inquiries`: an owner (or anyone) reaching out to a barber
-  -- from their public profile page, rather than about one specific listing.
+  -- Reverse of the 'inquiries' table: an owner (or anyone) reaching out to a
+  -- barber from their public profile page, rather than about one listing.
   CREATE TABLE IF NOT EXISTS barber_inquiries (
     id SERIAL PRIMARY KEY,
     barber_id INTEGER NOT NULL REFERENCES users(id),
